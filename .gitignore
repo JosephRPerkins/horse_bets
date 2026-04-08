@@ -1,0 +1,52 @@
+# Credentials — never commit
+config.py
+certs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+.env
+
+# Logs
+logs/
+*.log
+
+# Data — raw race data and generated cards (large, personal)
+data/raw/
+data/cards/
+data/history/
+data/results/
+data/logs/
+data/streaks/
+
+# Keep simulation results (backtest reference data)
+!data/simulation/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Misc
+*.bak
+openapi.json
+
+# Claude Code personal settings
+.claude/
+
+# Old versions
+horse_bets_v1/
