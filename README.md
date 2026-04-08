@@ -23,7 +23,7 @@ Both bots are controlled via Telegram commands and run as background processes (
 ### 1. Clone and install dependencies
 
 ```bash
-git clone https://github.com/yourusername/horse_bets_v3.git
+git clone https://github.com/AlexAnderson220994/horse_bets_v3.git
 cd horse_bets_v3
 python3 -m venv venv
 source venv/bin/activate
