@@ -51,11 +51,9 @@ def sp_str(sp_dec):
     if sp_dec is None:
         return "—"
     if sp_dec < 2.0:
-        # odds-on: show as fraction
         num = sp_dec - 1
         return f"{num:.2g}/1"
     frac = sp_dec - 1
-    # round to nearest common fraction
     return f"{frac:.1f}/1"
 
 def finished_in(pos, n):
@@ -89,18 +87,48 @@ def dist_furlongs(dist_f_str):
 
 # ── Signal scoring ────────────────────────────────────────────────────────────
 
+# NOTE: tsr_gte_or is handled dynamically in score_runner() — 2/3/4/5 pts by margin
 SIGNAL_WEIGHTS = {
-    "sp_odds_on":    3,   # SP < 2.0
-    "sp_2_to_4":     2,   # SP 2–4
-    "sp_4_to_6":     1,   # SP 4–6
-    "tsr_gte_or":    3,   # TSR > OR (strongest signal)
-    "rpr_gte_or":    2,   # RPR >= OR
-    "trainer_pos":   1,   # trainer 14d P&L > 0 (min 5 runs)
-    "jockey_pos":    1,   # jockey 14d P&L > 0 (min 5 runs)
-    "form_3_of_4":   2,   # placed 3+ of last 4
-    "form_2_of_4":   1,   # placed 2+ of last 4
-    "no_bad_recent": 1,   # no PU/F/UR in last 3 runs
+    "sp_odds_on":          3,   # SP < 2.0
+    "sp_2_to_4":           2,   # SP 2–4
+    "sp_4_to_6":           1,   # SP 4–6
+    # tsr_gte_or: dynamic — see score_runner()
+    "rpr_gte_or":          2,   # RPR >= OR
+    "trainer_pos":         1,   # trainer 14d P&L > 0 (min 5 runs)
+    "jockey_pos":          1,   # jockey 14d P&L > 0 (min 5 runs)
+    "form_3_of_4":         2,   # placed 3+ of last 4
+    "form_2_of_4":         1,   # placed 2+ of last 4
+    "no_bad_recent":       1,   # no PU/F/UR in last 3 runs
+    "going_form":          2,   # won 1 in 3+ on today's going (min 2 runs)
+    "going_penalty":      -2,   # never won on today's going in 3+ tries
+    "dist_change_penalty": -1,  # stepping up/down 4+ furlongs vs recent avg
 }
+
+def _normalise_going(going: str) -> str:
+    """
+    Reduce going descriptions to a canonical category for comparison.
+    Handles variations like 'Good to Soft (Soft in places)' -> 'good to soft'
+    """
+    if not going:
+        return ""
+    g = going.lower().strip()
+    # Strip parenthetical qualifiers e.g. "(soft in places)"
+    if "(" in g:
+        g = g[:g.index("(")].strip()
+    return g
+
+
+def _going_matches(today: str, record_key: str) -> bool:
+    """
+    Check if today's going broadly matches a going_record key.
+    Uses substring matching on normalised strings.
+    """
+    t = _normalise_going(today)
+    r = _normalise_going(record_key)
+    if not t or not r:
+        return False
+    return t in r or r in t
+
 
 def score_runner(runner):
     sp   = to_float(runner.get("sp_dec"))
@@ -113,6 +141,7 @@ def score_runner(runner):
 
     signals = {}
 
+    # ── SP signals ────────────────────────────────────────────────────────────
     if sp is not None:
         if sp < 2.0:
             signals["sp_odds_on"] = SIGNAL_WEIGHTS["sp_odds_on"]
@@ -121,18 +150,39 @@ def score_runner(runner):
         elif sp < 6.0:
             signals["sp_4_to_6"]  = SIGNAL_WEIGHTS["sp_4_to_6"]
 
+    # ── TSR margin weighting ──────────────────────────────────────────────────
+    # Previously a flat 3 points for any TSR > OR.
+    # Now tiered by the size of the margin — a 20pt gap is far more significant
+    # than a 1pt gap, and was previously treated identically.
+    #
+    #   1–2 pts  → 2  (marginal, could be ratings noise)
+    #   3–7 pts  → 3  (meaningful edge — original weight preserved)
+    #   8–14 pts → 4  (solid upgrade, horse running above its rating)
+    #   15+ pts  → 5  (major upgrade, horse significantly underrated)
+    #
     if tsr is not None and or_ is not None and tsr > or_:
-        signals["tsr_gte_or"] = SIGNAL_WEIGHTS["tsr_gte_or"]
+        margin = tsr - or_
+        if margin >= 15:
+            signals["tsr_gte_or"] = 5
+        elif margin >= 8:
+            signals["tsr_gte_or"] = 4
+        elif margin >= 3:
+            signals["tsr_gte_or"] = 3
+        else:
+            signals["tsr_gte_or"] = 2
 
+    # ── RPR signal ────────────────────────────────────────────────────────────
     if rpr is not None and or_ is not None and rpr >= or_:
         signals["rpr_gte_or"] = SIGNAL_WEIGHTS["rpr_gte_or"]
 
+    # ── Trainer / jockey form ─────────────────────────────────────────────────
     if (t14.get("runs") or 0) >= 5 and (t14.get("pl") or 0) > 0:
         signals["trainer_pos"] = SIGNAL_WEIGHTS["trainer_pos"]
 
     if (j14.get("runs") or 0) >= 5 and (j14.get("pl") or 0) > 0:
         signals["jockey_pos"] = SIGNAL_WEIGHTS["jockey_pos"]
 
+    # ── Recent form ───────────────────────────────────────────────────────────
     placed = fd.get("placed_last_4", 0) or 0
     if placed >= 3:
         signals["form_3_of_4"] = SIGNAL_WEIGHTS["form_3_of_4"]
@@ -141,6 +191,54 @@ def score_runner(runner):
 
     if (fd.get("bad_recent") or 0) == 0:
         signals["no_bad_recent"] = SIGNAL_WEIGHTS["no_bad_recent"]
+
+    # ── Going form ────────────────────────────────────────────────────────────
+    # The going_record dict is built by api_client._derive_form() but was
+    # previously never used in scoring. We now reward horses with a proven
+    # record on today's going, and penalise those that have repeatedly failed
+    # on it (3+ runs, zero wins).
+    #
+    # Requires today's going to be present on the runner dict. If not available
+    # (e.g. data not yet enriched) the signal is silently skipped.
+    going_record = fd.get("going_record") or {}
+    today_going  = runner.get("going") or runner.get("race_going") or ""
+
+    if going_record and today_going:
+        # Find the best matching going category in the horse's record
+        best_match = None
+        for key, stats in going_record.items():
+            if _going_matches(today_going, key):
+                best_match = stats
+                break
+
+        if best_match:
+            runs = best_match.get("runs", 0) or 0
+            wins = best_match.get("wins", 0) or 0
+            if runs >= 2:
+                win_pct = wins / runs
+                if win_pct >= 0.33:
+                    # Won at least 1 in 3 on this going — proven performer
+                    signals["going_form"] = SIGNAL_WEIGHTS["going_form"]
+                elif wins == 0 and runs >= 3:
+                    # Never won on this going in 3+ tries — flag as negative
+                    signals["going_penalty"] = SIGNAL_WEIGHTS["going_penalty"]
+
+    # ── Distance change penalty ───────────────────────────────────────────────
+    # Horses stepping up or dropping significantly in distance vs their recent
+    # form races tend to underperform. recent_distances is populated by the
+    # extended _derive_form() in api_client.py. Silently skipped if not present.
+    today_dist    = to_float(runner.get("dist_f"))
+    recent_dists  = fd.get("recent_distances") or []
+
+    if today_dist and recent_dists:
+        valid = [d for d in recent_dists if d is not None]
+        if len(valid) >= 2:
+            avg_dist = sum(valid) / len(valid)
+            diff = abs(today_dist - avg_dist)
+            if diff >= 8:
+                signals["dist_change_penalty"] = SIGNAL_WEIGHTS["dist_change_penalty"] * 2
+            elif diff >= 4:
+                signals["dist_change_penalty"] = SIGNAL_WEIGHTS["dist_change_penalty"]
 
     return sum(signals.values()), signals
 
@@ -227,11 +325,11 @@ def predict_race(race, show_scores=False):
     Returns a dict with prediction details and outcome.
     """
     runners = race.get("runners", [])
-    # Only score runners that have a valid numeric position (i.e. ran)
-    # We still predict from all runners (pre-race we don't know who DNF)
-    # but for result checking we need actual positions
     scored = []
     for r in runners:
+        # Pass race-level going down to runner for going_form signal
+        if "going" not in r and race.get("going"):
+            r = {**r, "race_going": race.get("going")}
         sc, signals = score_runner(r)
         sp = to_float(r.get("sp_dec"), 999)
         scored.append((sc, sp, r, signals))
@@ -242,7 +340,7 @@ def predict_race(race, show_scores=False):
     n_runners = len(runners)
     places    = place_terms(n_runners)
 
-    win_pick   = scored[0] if len(scored) >= 1 else None
+    win_pick    = scored[0] if len(scored) >= 1 else None
     place_picks = scored[1:3] if len(scored) >= 3 else scored[1:2]
 
     return {
@@ -257,9 +355,9 @@ def predict_race(race, show_scores=False):
 
 
 def display_race(pred, race_num):
-    race       = pred["race"]
-    places     = pred["places"]
-    win_pick   = pred["win_pick"]
+    race        = pred["race"]
+    places      = pred["places"]
+    win_pick    = pred["win_pick"]
     place_picks = pred["place_picks"]
     show_scores = pred["show_scores"]
 
@@ -357,18 +455,15 @@ def main():
     for i, race in enumerate(races, 1):
         pred = predict_race(race, show_scores=args.scores)
 
-        # Count separately
         n_runners = pred["n_runners"]
         places    = pred["places"]
 
-        # WIN
         if pred["win_pick"]:
             sc, _, r, _ = pred["win_pick"]
             win_landed = finished_in(r.get("position", ""), 1)
             win_correct += 1 if win_landed else 0
             win_total   += 1
 
-        # PLACE picks
         for pick in pred["place_picks"]:
             sc, _, r, _ = pick
             pl_landed = finished_in(r.get("position", ""), places)
@@ -396,7 +491,6 @@ def main():
     print(f"  OVERALL          : {total_correct}/{total_picks}  ({pct(total_correct, total_picks)})")
     print()
 
-    # Score breakdown — how many races got all 3 right, 2/3, 1/3, 0/3
     breakdown = defaultdict(int)
     for c, t in race_results:
         breakdown[f"{c}/{t}"] += 1
