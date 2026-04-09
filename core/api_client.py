@@ -355,11 +355,12 @@ class RacingAPIClient:
         bad_codes = {"P", "F", "U", "R", "PU", "BD", "RO", "UR"}
         if not form_str:
             return {
-                "form_string":      "",
-                "recent_positions": [],
-                "placed_last_4":    0,
-                "bad_recent":       0,
-                "going_record":     {},
+                "form_string":        "",
+                "recent_positions":   [],
+                "recent_distances":   [],   # populated by _derive_form only
+                "placed_last_4":      0,
+                "bad_recent":         0,
+                "going_record":       {},
             }
         import re
         parts = re.split(r"[-/\s]", form_str.strip())
@@ -373,19 +374,33 @@ class RacingAPIClient:
         last_3 = parts[-3:] if len(parts) >= 3 else parts
 
         return {
-            "form_string":      form_str,
-            "recent_positions": parts,
-            "placed_last_4":    sum(1 for p in last_4 if is_placed(p)),
-            "bad_recent":       sum(1 for p in last_3 if p.upper() in bad_codes),
-            "going_record":     {},
+            "form_string":        form_str,
+            "recent_positions":   parts,
+            "recent_distances":   [],   # not available from form string alone
+            "placed_last_4":      sum(1 for p in last_4 if is_placed(p)),
+            "bad_recent":         sum(1 for p in last_3 if p.upper() in bad_codes),
+            "going_record":       {},
         }
 
     @staticmethod
     def _derive_form(horse_id: str, races: list) -> dict:
-        """Build form_detail dict from a horse's last N results."""
-        positions    = []
-        going_record = {}
-        bad_codes    = {"P", "F", "U", "R", "PU", "BD", "RO", "UR"}
+        """
+        Build form_detail dict from a horse's last N results.
+
+        Extended to capture recent_distances alongside positions and going_record.
+        recent_distances is a list of dist_f values (furlongs as float) for each
+        race in the same order as recent_positions. Used by score_runner() in
+        predict.py to apply a distance change penalty when a horse is stepping
+        significantly up or down in trip vs its recent form races.
+
+        None is stored where dist_f is missing so the list length stays
+        consistent with recent_positions — callers filter out None values
+        before computing averages.
+        """
+        positions         = []
+        distances         = []   # NEW — dist_f for each race in furlongs
+        going_record      = {}
+        bad_codes         = {"P", "F", "U", "R", "PU", "BD", "RO", "UR"}
 
         for race in races:
             runners = race.get("runners") or []
@@ -394,9 +409,27 @@ class RacingAPIClient:
             )
             if not runner:
                 continue
+
             pos   = runner.get("position", "")
             going = race.get("going", "Unknown")
+
+            # ── Capture distance ──────────────────────────────────────────────
+            # dist_f is the race distance in furlongs as a float string e.g. "12f"
+            # or sometimes a bare float. We store None if absent so the index
+            # stays aligned with positions[].
+            raw_dist = race.get("dist_f") or race.get("distance_f")
+            if raw_dist is not None:
+                try:
+                    dist_val = float(str(raw_dist).replace("f", "").strip())
+                except (ValueError, TypeError):
+                    dist_val = None
+            else:
+                dist_val = None
+
             positions.append(pos)
+            distances.append(dist_val)   # NEW
+
+            # ── Going record ──────────────────────────────────────────────────
             if going not in going_record:
                 going_record[going] = {"runs": 0, "wins": 0}
             going_record[going]["runs"] += 1
@@ -411,9 +444,10 @@ class RacingAPIClient:
         last_3 = positions[-3:] if len(positions) >= 3 else positions
 
         return {
-            "form_string":      "-".join(positions) if positions else "",
-            "recent_positions": positions,
-            "placed_last_4":    sum(1 for p in last_4 if is_placed(p)),
-            "bad_recent":       sum(1 for p in last_3 if str(p).upper() in bad_codes),
-            "going_record":     going_record,
+            "form_string":        "-".join(positions) if positions else "",
+            "recent_positions":   positions,
+            "recent_distances":   distances,   # NEW
+            "placed_last_4":      sum(1 for p in last_4 if is_placed(p)),
+            "bad_recent":         sum(1 for p in last_3 if str(p).upper() in bad_codes),
+            "going_record":       going_record,
         }
