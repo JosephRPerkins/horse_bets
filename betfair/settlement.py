@@ -9,6 +9,9 @@ determine finishing position. No balance-log inference — win/loss is read
 directly from the result.
 
 Each race runs in its own daemon thread — no race blocks another.
+
+Tier tracker is called after each settlement to log the outcome against the
+confidence tier. This feeds the live validation report and EOD summary.
 """
 
 import logging
@@ -62,16 +65,81 @@ def _get_finish_pos(result: dict, horse_name: str) -> int | None:
     return None
 
 
+def _log_to_tier_tracker(
+    race_id:    str,
+    race_label: str,
+    race:       dict,
+    bets:       list,
+    results:    list,
+    places:     int,
+):
+    """
+    Log this race outcome to the tier tracker.
+
+    Called after settlement completes with real results. Silently skips if
+    tier tracker is unavailable or the race dict is missing tier information
+    — we never want a tracker failure to affect settlement.
+
+    race:    the race metadata dict passed through from the scheduler/betfair_main
+             (must contain 'tier', 'course', 'off', and optionally 'tsr_solo')
+    bets:    the original bet list [{horse, price, stake, ...}]
+    results: the settled results list [(bet, won, pnl, detail), ...]
+    places:  place terms for this race (used to determine what counted as a win)
+    """
+    try:
+        from utils.tier_tracker import log_result
+
+        tier     = race.get("tier")
+        course   = race.get("course", "?")
+        off      = race.get("off", "?")
+        tsr_solo = race.get("tsr_solo", False)
+
+        if tier is None:
+            logger.debug("tier_tracker: no tier on race dict — skipping log")
+            return
+
+        # Match bets to their settled outcomes
+        # bets[0] = pick1, bets[1] = pick2 (order preserved from placement)
+        pick1_name = bets[0].get("horse", "?") if len(bets) > 0 else "?"
+        pick2_name = bets[1].get("horse", "?") if len(bets) > 1 else "?"
+
+        # win1/win2: True if the pick won (finished 1st — exchange is back bet)
+        # We use the settled result directly rather than re-checking position
+        win1 = results[0][1] if len(results) > 0 else False
+        win2 = results[1][1] if len(results) > 1 else False
+
+        log_result(
+            race_id  = race_id,
+            tier     = tier,
+            course   = course,
+            off      = off,
+            pick1    = pick1_name,
+            pick2    = pick2_name,
+            win1     = win1,
+            win2     = win2,
+            places   = places,
+            tsr_solo = tsr_solo,
+        )
+
+    except Exception as e:
+        # Never let tracker errors bubble up into settlement
+        logger.error(f"tier_tracker log failed for {race_label}: {e}")
+
+
 def settle_race(placement_ts: str, race_id: str, race_label: str,
                 race_off_iso: str, balance_before: float,
                 balance_after_placement: float,
-                bets: list, state: dict):
+                bets: list, state: dict,
+                race: dict = None, places: int = 1):
     """
     Daemon thread per live race. Waits until race_off + SETTLE_WAIT_M, then
     polls the Racing API for the result and calculates P&L from finishing
     positions.
 
-    bets: list of {horse, price, stake, potential_win_credit, bet_id}
+    bets:   list of {horse, price, stake, potential_win_credit, bet_id}
+    race:   full race metadata dict (needed for tier tracker logging).
+            Optional for backwards compatibility — tracker is skipped if None.
+    places: place terms for this race (needed for tier tracker context).
     """
     logger.info(f"Settlement thread started: {race_label}")
 
@@ -135,6 +203,19 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
 
     total_pnl = round(total_pnl, 2)
 
+    # ── Log to tier tracker ───────────────────────────────────────────────────
+    # Done immediately after results are known, before state update or
+    # notification — so the data is recorded even if something fails downstream.
+    if race is not None:
+        _log_to_tier_tracker(
+            race_id    = race_id,
+            race_label = race_label,
+            race       = race,
+            bets       = bets,
+            results    = results,
+            places     = places,
+        )
+
     # ── Update daily state ────────────────────────────────────────────────────
     state["daily_pnl"] = round(state.get("daily_pnl", 0.0) + total_pnl, 2)
     state["daily_bets"].append({
@@ -176,6 +257,7 @@ def _settle_fallback(race_label: str, bets: list, state: dict):
     """
     Called when Racing API result is unavailable after polling.
     Marks all bets as unknown and notifies — does NOT attempt balance inference.
+    Note: tier tracker is NOT updated on fallback since we have no confirmed result.
     """
     lines = [
         f"⚠️ <b>SETTLE FAILED — {race_label}</b>",
