@@ -57,6 +57,7 @@ from betfair.balance_log import log_bet_placed, start_balance_logger
 from betfair.settlement  import settle_race
 from betfair.notify      import send, send_chunks, set_muted
 from betfair.commands    import start_command_listener
+from predict             import place_terms
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -105,6 +106,15 @@ def _parse_off_dt(race: dict) -> datetime | None:
         return None
 
 
+def _race_places(race: dict) -> int:
+    """
+    Derive place terms for a race from its runner count.
+    Used when passing places to settle_race() for tier tracker context.
+    """
+    n = len(race.get("runners", [])) or race.get("field_size", 0) or 0
+    return place_terms(n) if n else 1
+
+
 # ── Racing API result fetcher (for paper settlement) ──────────────────────────
 
 def _fetch_result(race_id: str) -> dict | None:
@@ -148,6 +158,9 @@ def _paper_settle(race: dict, paper_bets: list, state: dict):
     Daemon thread — waits until race_off + 15 minutes, then polls the
     Racing API for the result and calculates simulated P&L.
 
+    Also logs to tier tracker so paper trades contribute to the live
+    validation report alongside real bets.
+
     paper_bets: list of {horse, price, stake, label}
     """
     race_label = f"{race.get('off','?')} {race.get('course','?')}"
@@ -189,8 +202,9 @@ def _paper_settle(race: dict, paper_bets: list, state: dict):
         return
 
     # Infer P&L for each paper bet
-    total_pnl = 0.0
+    total_pnl  = 0.0
     icon       = "✅"
+    bet_results = []
     lines      = [
         f"📝 <b>PAPER SETTLED — {race_label}</b>",
         "──────────────────────────────",
@@ -206,22 +220,52 @@ def _paper_settle(race: dict, paper_bets: list, state: dict):
         if pos == 1:
             profit = round(stake * (price - 1) * (1 - COMMISSION), 2)
             total_pnl += profit
+            won = True
             lines.append(
                 f"✅ {label} {horse} @ {price} — "
                 f"WON 1st (+£{profit:.2f})"
             )
         elif pos is not None:
             total_pnl -= stake
+            won = False
             lines.append(
                 f"❌ {label} {horse} @ {price} — "
                 f"LOST {pos}{'st' if pos==1 else 'nd' if pos==2 else 'rd' if pos==3 else 'th'} (-£{stake:.2f})"
             )
         else:
             total_pnl -= stake
+            won = False
             lines.append(
                 f"❌ {label} {horse} @ {price} — "
                 f"LOST (NR/inc) (-£{stake:.2f})"
             )
+        bet_results.append((bet, won))
+
+    # ── Log paper result to tier tracker ─────────────────────────────────────
+    # Paper trades are logged so the validation report includes simulation data
+    # alongside live bets. Failures are caught silently — never affect settlement.
+    try:
+        from utils.tier_tracker import log_result
+        tier     = race.get("tier")
+        tsr_solo = race.get("tsr_solo", False)
+        places   = _race_places(race)
+        if tier is not None and len(bet_results) >= 1:
+            win1 = bet_results[0][1] if len(bet_results) > 0 else False
+            win2 = bet_results[1][1] if len(bet_results) > 1 else False
+            log_result(
+                race_id  = f"paper_{race_id}",   # prefix to avoid collision with live
+                tier     = tier,
+                course   = race.get("course", "?"),
+                off      = race.get("off", "?"),
+                pick1    = paper_bets[0]["horse"] if paper_bets else "?",
+                pick2    = paper_bets[1]["horse"] if len(paper_bets) > 1 else "?",
+                win1     = win1,
+                win2     = win2,
+                places   = places,
+                tsr_solo = tsr_solo,
+            )
+    except Exception as e:
+        logger.error(f"tier_tracker paper log failed for {race_label}: {e}")
 
     if total_pnl < 0:
         icon = "❌"
@@ -244,7 +288,7 @@ def _paper_settle(race: dict, paper_bets: list, state: dict):
         f"Race P&L:  {sign}£{total_pnl:.2f}",
         f"Day P&L:   {day_sign}£{state['paper_daily_pnl']:.2f}",
     ]
-    send(f"{icon} " + "\n".join(lines)[2:])   # prepend icon to first line
+    send(f"{icon} " + "\n".join(lines)[2:])
     logger.info(f"Paper settled {race_label}: P&L {sign}£{total_pnl:.2f}")
 
 
@@ -411,6 +455,8 @@ def _live_bet_job(race: dict, state: dict):
         })
 
     race_off_iso = str(race.get("off_dt", ""))
+    places       = _race_places(race)
+
     t = threading.Thread(
         target = settle_race,
         args   = (
@@ -418,6 +464,8 @@ def _live_bet_job(race: dict, state: dict):
             race_off_iso, balance_before, balance_after,
             settle_bets, state,
         ),
+        # Pass race and places as kwargs so tier tracker can log correctly
+        kwargs = {"race": race, "places": places},
         daemon = True,
         name   = f"Settle_{race.get('race_id', '')}",
     )
@@ -470,11 +518,9 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
 
     redirect = stake_a == 0
 
-    # Apply liquidity for paper display (but don't enforce skip — it's simulated)
     actual_a, actual_b, _, _ = apply_liquidity(
         stake_a, stake_b, liq_a, liq_b, redirect
     )
-    # If liquidity is unknown (no market), use tier stakes directly
     if not mkt_ok:
         actual_a, actual_b = stake_a, stake_b
 
@@ -522,7 +568,6 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     if not silent:
         send("\n".join(lines))
 
-    # Spawn paper settlement thread — always fires regardless of silent
     t = threading.Thread(
         target = _paper_settle,
         args   = (race, paper_bets, state),
@@ -539,7 +584,6 @@ def bet_job(race: dict, state: dict):
         logger.info(f"Paused — skipping {race.get('off')} {race.get('course')}")
         return
 
-    # Check race hasn't already started
     now_utc = datetime.now(timezone.utc)
     off_utc = _to_utc(race.get("off_dt", ""))
     if off_utc and now_utc >= off_utc:
@@ -552,7 +596,6 @@ def bet_job(race: dict, state: dict):
     mode = state.get("mode", "paper")
     if mode == "live":
         _live_bet_job(race, state)
-        # Paper always tracks in background — silent so no duplicate notifications
         _paper_bet_job(race, state, silent=True)
     else:
         _paper_bet_job(race, state, silent=False)
@@ -604,6 +647,17 @@ def end_of_day_job(state: dict):
             sign = "+" if b.get("total_pnl", 0) >= 0 else ""
             lines.append(f"  {icon} {b['race']} → {sign}£{b['total_pnl']:.2f}")
 
+    # ── Tier tracker EOD summary ──────────────────────────────────────────────
+    # Appended after the P&L summary so it appears at the bottom of the
+    # EOD Telegram message. Catches all errors silently.
+    try:
+        from utils.tier_tracker import get_eod_summary
+        tracker_summary = get_eod_summary()
+        if tracker_summary:
+            lines += ["══════════════════════════════", tracker_summary]
+    except Exception as e:
+        logger.error(f"tier_tracker EOD summary failed: {e}")
+
     lines += [
         "──────────────────────────────",
         f"Tomorrow's stake: {stake_display(bal)}",
@@ -615,10 +669,10 @@ def end_of_day_job(state: dict):
 # ── Startup ───────────────────────────────────────────────────────────────────
 
 def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = True):
-    races     = _load_today()
-    now       = datetime.now()
-    bal       = get_balance()
-    mode      = state.get("mode", "paper").upper()
+    races      = _load_today()
+    now        = datetime.now()
+    bal        = get_balance()
+    mode       = state.get("mode", "paper").upper()
     qualifying = [r for r in races if qualifies(r)]
     scheduled  = 0
     last_off   = None
@@ -717,9 +771,9 @@ def _midnight_job(scheduler: BackgroundScheduler, state: dict):
 
 def _midday_refresh(scheduler: BackgroundScheduler, state: dict):
     logger.info("midday_refresh")
-    races     = _load_today()
-    now       = datetime.now()
-    bal       = get_balance()
+    races      = _load_today()
+    now        = datetime.now()
+    bal        = get_balance()
     qualifying = [r for r in races if qualifies(r)]
     scheduled  = 0
     for race in qualifying:
@@ -762,7 +816,6 @@ def main():
     if state.get("last_date") != today:
         state = reset_daily(state)
 
-    # Apply persisted mute/mode state immediately
     set_muted(state.get("muted", False))
 
     scheduler = BackgroundScheduler(timezone="Europe/London")
@@ -782,13 +835,8 @@ def main():
     scheduler.start()
     logger.info("Scheduler started")
 
-    # Balance logger — audit trail of balance movements
     start_balance_logger(get_balance, interval_s=15)
-
-    # Command listener
     start_command_listener(state)
-
-    # Load card + schedule bet jobs + send briefing
     startup(scheduler, state, send_briefing=True)
 
     try:
