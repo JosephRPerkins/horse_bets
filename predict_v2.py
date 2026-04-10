@@ -245,6 +245,9 @@ def predict_race(race):
     runners = race.get("runners", [])
     scored = []
     for r in runners:
+        # Pass race-level going down to runner so going_form signal can fire
+        if "going" not in r and race.get("going"):
+            r = {**r, "race_going": race.get("going")}
         sc, signals = score_runner(r)
         sp = to_float(r.get("sp_dec"), 999)
         scored.append((sc, sp, r, signals))
