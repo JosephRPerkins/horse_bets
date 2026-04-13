@@ -15,11 +15,21 @@ Backtest findings (30 days, 322 races, bot-matched picks):
 Rules:
   - All tiers qualify (Good/Skip capped at Tier 1 stake)
   - Pick 2 is primary — must be 3/1+ (≥ 4.0 dec) or race is skipped
-  - Pick 1 only backed at 2/1+ (≥ 2.0 dec) — skip if odds-on
-  - If Pick 1 is odds-on: redirect its stake to Pick 2 (double up)
+  - SUPREME: Pick 1 always backed regardless of price (TSR solo is
+    strong enough to back at any odds). Pick 2 backed at tier stake.
+  - STRONG: Pick 1 backed at 2/1+ only. If Pick 1 is odds-on the race
+    is SKIPPED entirely — redirecting to Pick 2 consistently loses when
+    the identified winner is odds-on.
+  - GOOD/STANDARD: If Pick 1 is odds-on its stake is redirected to Pick 2.
   - Both picks always staked equally at min(tier_stake, liquidity_both)
   - Liquidity < £2 on either pick → skip race
   - Top-up notifications at £10 (warning) and £4 (critical)
+
+Odds-on handling by tier:
+  SUPREME  → back Pick 1 at any price (TSR solo confidence)
+  STRONG   → skip race if Pick 1 odds-on (don't redirect)
+  GOOD     → redirect Pick 1 stake to Pick 2 if odds-on
+  STANDARD → redirect Pick 1 stake to Pick 2 if odds-on
 """
 
 import sys
@@ -39,7 +49,9 @@ ATTRITION_GOING  = {"soft", "yielding to soft", "soft to heavy", "heavy"}
 ATTRITION_DIST_F = 20.0    # 2m4f in furlongs
 
 # Minimum prices
-MIN_PICK1_PRICE = 2.0    # Pick 1 must be 2/1+ (redirect if odds-on)
+MIN_PICK1_PRICE = 2.0    # Pick 1 must be 2/1+ for GOOD/STANDARD (redirect if odds-on)
+                         # Not applied to SUPREME (always backed)
+                         # STRONG skips entirely if Pick 1 is odds-on
 MIN_PICK2_PRICE = 4.0    # Pick 2 must be 3/1+ (skip race if shorter)
 
 # ── Staking ───────────────────────────────────────────────────────────────────
@@ -133,9 +145,17 @@ def qualifies(race: dict) -> bool:
     return True
 
 
-def should_back_pick1(pick1_price: float | None) -> bool:
+def should_back_pick1(pick1_price: float | None, tier: int = TIER_STD) -> bool:
+    """
+    Determine whether Pick 1 should be backed given its price and race tier.
+
+    SUPREME: back at any price > 1.0 — TSR solo confidence justifies it.
+    All others: must be 2/1+ (≥ 2.0 dec).
+    """
     if not pick1_price:
         return False
+    if tier == TIER_SUPREME:
+        return pick1_price > 1.0   # back at any price for SUPREME
     return pick1_price >= MIN_PICK1_PRICE
 
 
@@ -152,15 +172,22 @@ def pick_stakes(balance: float, tsr: bool,
     """
     Return (stake_pick1, stake_pick2).
 
-    Pick 2 is primary — always backed if price qualifies.
-    Pick 1 only backed at 2/1+; redirected to Pick 2 if odds-on.
+    Odds-on handling by tier:
+      SUPREME  → back Pick 1 at any price (TSR solo confidence)
+      STRONG   → skip race entirely if Pick 1 is odds-on (return 0, 0)
+      GOOD     → redirect Pick 1 stake to Pick 2 if odds-on
+      STANDARD → redirect Pick 1 stake to Pick 2 if odds-on
+
+    Pick 2 is always the anchor — race is skipped if Pick 2 price gate fails.
     Good/Skip races capped at Tier 1 (£2/horse) regardless of balance.
-    TSR trigger gives Pick 1 one tier bump when it qualifies.
+    TSR trigger gives Pick 1 one tier bump when it qualifies on SUPREME.
 
     NOTE: Returned stakes are the tier stakes before liquidity adjustment.
     Caller must apply min(stake, liquidity_both) and enforce MIN_LIQUIDITY.
 
-    Returns (0.0, 0.0) if Pick 2 price gate fails.
+    Returns (0.0, 0.0) if:
+      - Pick 2 price gate fails
+      - STRONG tier with odds-on Pick 1 (skip entirely)
     """
     if not should_back_pick2(pick2_price):
         return 0.0, 0.0
@@ -173,15 +200,33 @@ def pick_stakes(balance: float, tsr: bool,
         base     = get_stake(balance)
         redirect = get_redirect_stake(balance)
 
-    if should_back_pick1(pick1_price):
+    p1_qualifies = should_back_pick1(pick1_price, tier)
+    p1_odds_on   = pick1_price is not None and pick1_price < MIN_PICK1_PRICE
+
+    if p1_qualifies:
+        # Pick 1 qualifies — back both
         s1 = get_tsr_stake(balance) if (tsr and tier not in TIER1_CAP_TIERS) else base
         s2 = base
-    else:
-        # Odds-on or no price — redirect to Pick 2
-        s1 = 0.0
-        s2 = redirect
+        return s1, s2
 
-    return s1, s2
+    elif p1_odds_on:
+        # Pick 1 is odds-on — behaviour depends on tier
+        if tier == TIER_SUPREME:
+            # SUPREME: back at any price — TSR solo is strong enough
+            s1 = get_tsr_stake(balance) if tier not in TIER1_CAP_TIERS else base
+            s2 = base
+            return s1, s2
+        elif tier == TIER_STRONG:
+            # STRONG: skip race entirely — redirecting consistently loses
+            # when the model's identified winner is odds-on
+            return 0.0, 0.0
+        else:
+            # GOOD/STANDARD: redirect Pick 1 stake to Pick 2
+            return 0.0, redirect
+
+    else:
+        # Pick 1 has no price — redirect to Pick 2
+        return 0.0, redirect
 
 
 def apply_liquidity(stake_a: float, stake_b: float,
@@ -251,5 +296,5 @@ def stake_display(balance: float) -> str:
     r = get_redirect_stake(balance)
     return (
         f"Pick 2: £{s:.0f} (or £{r:.0f} if Pick 1 odds-on) | "
-        f"Pick 1: £{s:.0f} (2/1+ only)"
+        f"Pick 1: £{s:.0f} (2/1+ only, any price for SUPREME)"
     )
