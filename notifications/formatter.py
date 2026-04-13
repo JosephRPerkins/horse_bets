@@ -252,6 +252,19 @@ def format_pre_race_alert(
                     f"(needs Top-{std_for_field}, cons Top-{cons_for_field})"
                 )
 
+# ── Outlier value flags ───────────────────────────────────────────────────
+    # Horses the model scored low but which match the profile of big-priced
+    # winners from historical analysis. Flagged as each-way value only —
+    # not a model pick, just a heads-up. Only shown on STANDARD/SKIP races.
+    outlier_picks = race.get("outlier_picks", [])
+    if outlier_picks:
+        lines.append(f"\n💡 <b>Value flags</b> (each-way only, model scored low)")
+        for o in outlier_picks:
+            name   = o.get("horse", "?")
+            reason = o.get("outlier_reason", "")
+            lines.append(f"  💡 {name} — {reason}")
+        lines.append("")
+
     # ── All runners table ─────────────────────────────────────────────────────
     all_runners = race.get("all_runners", [])
     if all_runners:
