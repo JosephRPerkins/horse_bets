@@ -578,7 +578,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
         else:
             lines.append(f"⚠️ {label}: {horse} — no usable price")
 
-a_label = "⭐ Pick 1 (TSR)" if tsr else "⭐ Pick 1"
+    a_label = "⭐ Pick 1 (TSR)" if tsr else "⭐ Pick 1"
     _log(a_name, actual_a, a_live, liq_a, a_label)
     _log(b_name, actual_b, b_live, liq_b, "🔵 Pick 2")
 
