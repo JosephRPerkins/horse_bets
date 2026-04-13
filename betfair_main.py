@@ -210,7 +210,7 @@ def _paper_settle(race: dict, paper_bets: list, state: dict):
         "──────────────────────────────",
     ]
 
-  for bet in paper_bets:
+    for bet in paper_bets:
         horse      = bet["horse"]
         price      = bet["price"]
         stake      = bet["stake"]
