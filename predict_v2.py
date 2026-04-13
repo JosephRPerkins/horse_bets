@@ -261,19 +261,122 @@ def predict_race(race):
     tier, reasons = race_confidence(race, win_score)
 
     return {
-        "race":        race,
-        "n_runners":   n_runners,
-        "places":      places,
-        "cons_places": cons_places,
-        "win_pick":    scored[0] if scored else None,
-        "place_picks": scored[1:3] if len(scored) >= 3 else scored[1:2],
-        "all_scored":  scored,
-        "tier":        tier,
-        "reasons":     reasons,
-        "win_score":   win_score,
-        "tsr_solo":    has_tsr_solo(runners),
+        "race":         race,
+        "n_runners":    n_runners,
+        "places":       places,
+        "cons_places":  cons_places,
+        "win_pick":     scored[0] if scored else None,
+        "place_picks":  scored[1:3] if len(scored) >= 3 else scored[1:2],
+        "all_scored":   scored,
+        "tier":         tier,
+        "reasons":      reasons,
+        "win_score":    win_score,
+        "tsr_solo":     has_tsr_solo(runners),
+        "outlier_picks": _find_outliers(runners, tier),
     }
 
+
+def _find_outliers(runners: list, tier: int) -> list[dict]:
+    """
+    Identify potential value/outlier runners in a race.
+
+    Based on analysis of 80 big-priced winners (5/1+) over 5 days:
+    - 60% had TSR well below OR (avg margin -15.8) — dismissed by ratings
+    - Peak field size for outliers: 12 runners
+    - 64% came from Flat races
+    - Class 5/6 most common class
+
+    An outlier candidate is NOT a model pick — it's a horse the model
+    has scored low but which has characteristics associated with
+    big-priced winners. Flagged separately in alerts as each-way value.
+
+    Criteria:
+      - SP 6/1 or bigger (market has dismissed it)
+      - TSR within 10 points of OR either side (not a complete no-hoper,
+        just underperforming its rating slightly)
+      - No bad recent form (no PU/F/UR in last 3)
+      - Not already Pick 1 or Pick 2 (avoid duplicating main picks)
+      - Only fired on STANDARD or SKIP tier races — GOOD/STRONG/SUPREME
+        races already have a credible pick so outlier flag adds noise
+
+    Returns list of runner dicts with outlier_reason attached, max 2.
+    """
+    # Only flag outliers in lower tier races where main picks are weak
+    if tier not in (TIER_STD, TIER_SKIP):
+        return []
+
+    n = len(runners)
+
+    # Field size sweet spot from analysis — 8 to 16 runners
+    if n < 8 or n > 16:
+        return []
+
+    candidates = []
+    main_picks = set()
+
+    # Score all runners to identify top 2 (main picks to exclude)
+    scored_temp = []
+    for r in runners:
+        sc, _ = score_runner(r)
+        sp = to_float(r.get("sp_dec"), 999)
+        scored_temp.append((sc, sp, r))
+    scored_temp.sort(key=lambda x: (-x[0], x[1]))
+    for _, _, r in scored_temp[:2]:
+        main_picks.add(r.get("horse_id", r.get("horse", "")))
+
+    for r in runners:
+        hid = r.get("horse_id", r.get("horse", ""))
+        if hid in main_picks:
+            continue
+
+        sp_dec = to_float(r.get("sp_dec"))
+        if not sp_dec or sp_dec < 6.0:
+            continue
+
+        # TSR vs OR proximity check
+        try:
+            tsr = float(str(r.get("tsr", "")).replace("–", "").strip())
+            or_ = float(str(
+                r.get("or") or r.get("ofr") or r.get("race_going", "")
+            ).replace("–", "").strip())
+            margin = tsr - or_
+            # Within 10 points either side — not a no-hoper, just overlooked
+            if margin < -10 or margin > 5:
+                continue
+        except (ValueError, TypeError):
+            # No ratings — skip, can't assess
+            continue
+
+        # No bad recent form
+        fd = r.get("form_detail") or {}
+        if (fd.get("bad_recent") or 0) > 0:
+            continue
+
+        # Must have at least some form history
+        recent = fd.get("recent_positions") or []
+        if len(recent) < 2:
+            continue
+
+        reason_parts = []
+        reason_parts.append(f"SP {sp_str(sp_dec)}")
+        if margin >= 0:
+            reason_parts.append(f"TSR {tsr:.0f} vs OR {or_:.0f} (+{margin:.0f})")
+        else:
+            reason_parts.append(f"TSR {tsr:.0f} vs OR {or_:.0f} ({margin:.0f})")
+
+        placed_last_4 = fd.get("placed_last_4", 0) or 0
+        if placed_last_4 >= 2:
+            reason_parts.append(f"placed {placed_last_4}/4 recent")
+
+        candidates.append({
+            **r,
+            "outlier_reason": " · ".join(reason_parts),
+            "outlier_sp":     sp_dec,
+        })
+
+    # Sort by SP ascending (lowest price first — most likely to place)
+    candidates.sort(key=lambda x: x.get("outlier_sp", 999))
+    return candidates[:2]
 
 # ── Display ───────────────────────────────────────────────────────────────────
 
