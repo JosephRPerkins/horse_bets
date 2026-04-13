@@ -211,57 +211,34 @@ def _paper_settle(race: dict, paper_bets: list, state: dict):
     ]
 
     for bet in paper_bets:
-        horse      = bet["horse"]
-        price      = bet["price"]
-        stake      = bet["stake"]
-        label      = bet.get("label", "")
-        bet_type   = bet.get("bet_type", "win")   # "win" or "place"
-        place_terms_n = bet.get("place_terms", 1)
-        pos        = _get_finish_pos(result, horse)
+        horse  = bet["horse"]
+        price  = bet["price"]
+        stake  = bet["stake"]
+        label  = bet.get("label", "")
+        pos    = _get_finish_pos(result, horse)
 
-        if bet_type == "place":
-            # Each-way place part — wins if horse finishes within place terms
-            if pos is not None and pos <= place_terms_n:
-                profit = round(stake * (price - 1) * (1 - COMMISSION), 2)
-                total_pnl += profit
-                won = True
-                lines.append(
-                    f"✅ {label} @ {price} — "
-                    f"PLACED {pos}{'st' if pos==1 else 'nd' if pos==2 else 'rd' if pos==3 else 'th'} "
-                    f"(+£{profit:.2f})"
-                )
-            else:
-                total_pnl -= stake
-                won = False
-                pos_s = f"{pos}{'st' if pos==1 else 'nd' if pos==2 else 'rd' if pos==3 else 'th'}" if pos else "NR/inc"
-                lines.append(
-                    f"❌ {label} @ {price} — "
-                    f"UNPLACED {pos_s} (-£{stake:.2f})"
-                )
+        if pos == 1:
+            profit = round(stake * (price - 1) * (1 - COMMISSION), 2)
+            total_pnl += profit
+            won = True
+            lines.append(
+                f"✅ {label} {horse} @ {price} — "
+                f"WON 1st (+£{profit:.2f})"
+            )
+        elif pos is not None:
+            total_pnl -= stake
+            won = False
+            lines.append(
+                f"❌ {label} {horse} @ {price} — "
+                f"LOST {pos}{'st' if pos==1 else 'nd' if pos==2 else 'rd' if pos==3 else 'th'} (-£{stake:.2f})"
+            )
         else:
-            # Standard win bet
-            if pos == 1:
-                profit = round(stake * (price - 1) * (1 - COMMISSION), 2)
-                total_pnl += profit
-                won = True
-                lines.append(
-                    f"✅ {label} {horse} @ {price} — "
-                    f"WON 1st (+£{profit:.2f})"
-                )
-            elif pos is not None:
-                total_pnl -= stake
-                won = False
-                lines.append(
-                    f"❌ {label} {horse} @ {price} — "
-                    f"LOST {pos}{'st' if pos==1 else 'nd' if pos==2 else 'rd' if pos==3 else 'th'} (-£{stake:.2f})"
-                )
-            else:
-                total_pnl -= stake
-                won = False
-                lines.append(
-                    f"❌ {label} {horse} @ {price} — "
-                    f"LOST (NR/inc) (-£{stake:.2f})"
-                )
+            total_pnl -= stake
+            won = False
+            lines.append(
+                f"❌ {label} {horse} @ {price} — "
+                f"LOST (NR/inc) (-£{stake:.2f})"
+            )
         bet_results.append((bet, won))
 
     # ── Log paper result to tier tracker ─────────────────────────────────────
@@ -582,51 +559,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     _log(a_name, actual_a, a_live, liq_a, a_label)
     _log(b_name, actual_b, b_live, liq_b, "🔵 Pick 2")
 
-    # ── Outlier each-way paper bets ───────────────────────────────────────────
-    # Fixed £1 each-way (£1 win + £1 place) on any outlier flags.
-    # Completely separate from the main staking cascade — never compounds.
-    # Only placed on STANDARD/SKIP races where the outlier signal fires.
-    # Each-way simulated as two separate bets: win at full price,
-    # place at 1/4 odds. Place terms derived from field size.
-    outlier_picks = race.get("outlier_picks", [])
-    outlier_bets  = []
-    if outlier_picks and not silent:
-        lines.append("──────────────────────────────")
-        lines.append("💡 <b>Outlier flags (£1 e/w each)</b>")
-        for o in outlier_picks:
-            o_name   = o.get("horse", "?")
-            o_sel_id = find_selection_id(o_name, bf_runners) if mkt_ok else None
-            o_info   = odds.get(o_sel_id, {}) if (mkt_ok and o_sel_id) else {}
-            o_price  = o_info.get("back") or o.get("sp_dec")
-            if not o_price or o_price < 1.5:
-                lines.append(f"  💡 {o_name} — no usable price, skipped")
-                continue
-            reason = o.get("outlier_reason", "")
-            lines.append(f"  💡 {o_name} @ {o_price:.2f} — {reason}")
-            # Win part
-            outlier_bets.append({
-                "horse":  o_name,
-                "price":  o_price,
-                "stake":  1.0,
-                "label":  f"💡 Outlier WIN {o_name}",
-                "is_outlier": True,
-                "bet_type":   "win",
-            })
-            # Place part — 1/4 odds, settle based on place terms
-            place_price = round(((o_price - 1) / 4) + 1, 2)
-            outlier_bets.append({
-                "horse":      o_name,
-                "price":      place_price,
-                "stake":      1.0,
-                "label":      f"💡 Outlier PLACE {o_name}",
-                "is_outlier": True,
-                "bet_type":   "place",
-                "place_terms": _race_places(race),
-            })
-
-    all_paper_bets = paper_bets + outlier_bets
-
-    if not all_paper_bets:
+    if not paper_bets:
         if not silent:
             lines.append("\nℹ️ No paper bets logged")
             send("\n".join(lines))
@@ -637,7 +570,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
 
     t = threading.Thread(
         target = _paper_settle,
-        args   = (race, all_paper_bets, state),
+        args   = (race, paper_bets, state),
         daemon = True,
         name   = f"PaperSettle_{race.get('race_id', '')}",
     )
