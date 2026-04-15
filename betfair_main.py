@@ -57,14 +57,18 @@ from predict             import place_terms
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 os.makedirs("logs", exist_ok=True)
-logging.basicConfig(
-    level    = logging.INFO,
-    format   = "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers = [
-        logging.FileHandler("logs/betfair.log"),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
+root_logger = logging.getLogger()
+if not root_logger.handlers:
+    logging.basicConfig(
+        level    = logging.INFO,
+        format   = "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers = [
+            logging.FileHandler("logs/betfair.log"),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
+else:
+    logging.getLogger().setLevel(logging.INFO)
 logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
 logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 
