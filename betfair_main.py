@@ -1,26 +1,20 @@
 """
-betfair_main.py — horse_bets_v3 Betfair Exchange Bot
+betfair_main.py - horse_bets_v3 Betfair Exchange Bot
 
 Runs independently of main.py. Reads today.json written by the main bot,
 qualifies races from all tiers, and places (or simulates) bets on the
 Betfair Exchange 10 minutes before each race.
 
 Modes (toggle via Telegram):
-  /paper — simulated bets (default, safe). Finds real market + price,
+  /paper - simulated bets (default, safe). Finds real market + price,
            logs what would have been placed, settles from Racing API result.
            Paper ALWAYS runs in the background even in live mode.
-  /live  — real bets placed on Betfair Exchange. Full balance-log settlement.
+  /live  - real bets placed on Betfair Exchange. Full balance-log settlement.
 
-Strategy: Back Both (WIN market) — all tiers
-  All tiers:       back Pick 1 + Pick 2 at tier stake
-  Good/Skip:       capped at £2/horse regardless of balance
-  SUPREME (TSR):   Pick 1 gets one tier higher stake when it qualifies
-  Liquidity:       both picks always staked equally at min(tier, liq_a, liq_b)
-                   skip race if either pick has < £2 available
-
-Staking cascade (no ceiling — liquidity is the real cap):
-  £0–£19: £2 | £20–£39: £4 | £40–£79: £8 | £80–£159: £16
-  £160–£319: £32 | £320–£639: £64 | £640–£1279: £128 | ...
+Staking: WINNINGS-DRIVEN (not balance-driven)
+  Stakes grow only from cumulative net profit, not from initial deposit.
+  At zero profit stakes stay at 2/horse regardless of account balance.
+  Milestone notifications fire every 50 of cumulative profit.
 
 Usage:
     python betfair_main.py
@@ -51,8 +45,9 @@ from betfair.strategy    import (
     qualifies, is_tsr_trigger, get_stake, pick_stakes, apply_liquidity,
     check_topup_alerts, stake_display, MIN_BACK_PRICE, MIN_LIQUIDITY,
     MIN_PICK1_PRICE, MIN_PICK2_PRICE, should_back_pick1, should_back_pick2,
+    STAKE_TIERS,
 )
-from betfair.state       import load, save, reset_daily
+from betfair.state       import load, save, reset_daily, update_cumulative_profit
 from betfair.balance_log import log_bet_placed, start_balance_logger
 from betfair.settlement  import settle_race
 from betfair.notify      import send, send_chunks, set_muted
@@ -79,7 +74,7 @@ CARD_PATH = os.path.join(config.DIR_CARDS, "today.json")
 
 # ── Card loading ──────────────────────────────────────────────────────────────
 
-def _load_today() -> list[dict]:
+def _load_today() -> list:
     if not os.path.exists(CARD_PATH):
         return []
     try:
@@ -95,7 +90,7 @@ def _load_today() -> list[dict]:
     return data.get("races", [])
 
 
-def _parse_off_dt(race: dict) -> datetime | None:
+def _parse_off_dt(race: dict):
     off_dt_str = race.get("off_dt", "")
     if not off_dt_str:
         return None
@@ -107,21 +102,27 @@ def _parse_off_dt(race: dict) -> datetime | None:
 
 
 def _race_places(race: dict) -> int:
-    """
-    Derive place terms for a race from its runner count.
-    Used when passing places to settle_race() for tier tracker context.
-    """
     n = len(race.get("runners", [])) or race.get("field_size", 0) or 0
     return place_terms(n) if n else 1
 
 
-# ── Racing API result fetcher (for paper settlement) ──────────────────────────
+def _pick2_score(race: dict) -> int:
+    """Extract the model score for Pick 2 from the race dict."""
+    top2 = race.get("top2") or {}
+    return int(top2.get("score", 0) or 0)
 
-def _fetch_result(race_id: str) -> dict | None:
-    """
-    Fetch race result directly from the Racing API.
-    Used by paper settlement to determine if our picks finished in the money.
-    """
+
+def _next_tier_threshold(profit: float) -> float:
+    """Return the next profit threshold that would increase the stake tier."""
+    for min_profit, _, _ in STAKE_TIERS:
+        if profit < min_profit:
+            return float(min_profit)
+    return float(STAKE_TIERS[-1][0])
+
+
+# ── Racing API result fetcher ──────────────────────────────────────────────────
+
+def _fetch_result(race_id: str):
     url  = f"{config.RACING_API_BASE_URL}/results/{race_id}"
     auth = (config.RACING_API_USERNAME, config.RACING_API_PASSWORD)
     try:
@@ -136,8 +137,7 @@ def _fetch_result(race_id: str) -> dict | None:
     return None
 
 
-def _get_finish_pos(result: dict, horse_name: str) -> int | None:
-    """Return finishing position (int) for horse_name in a result dict, or None."""
+def _get_finish_pos(result: dict, horse_name: str):
     from betfair.api import _norm_horse
     norm = _norm_horse(horse_name)
     for r in result.get("runners", []):
@@ -155,18 +155,12 @@ def _get_finish_pos(result: dict, horse_name: str) -> int | None:
 
 def _paper_settle(race: dict, paper_bets: list, state: dict):
     """
-    Daemon thread — waits until race_off + 15 minutes, then polls the
-    Racing API for the result and calculates simulated P&L.
-
-    Also logs to tier tracker so paper trades contribute to the live
-    validation report alongside real bets.
-
-    paper_bets: list of {horse, price, stake, label}
+    Daemon thread - waits until race_off + 15 minutes, polls Racing API
+    for result, calculates P&L, updates cumulative profit, fires milestones.
     """
     race_label = f"{race.get('off','?')} {race.get('course','?')}"
     race_id    = race.get("race_id", "")
 
-    # Wait until race_off + 15 minutes
     off_dt_str = race.get("off_dt", "")
     try:
         off_dt = _to_utc(off_dt_str)
@@ -183,7 +177,6 @@ def _paper_settle(race: dict, paper_bets: list, state: dict):
         logger.info(f"Paper settle {race_label}: waiting {wait_s:.0f}s")
         time.sleep(wait_s)
 
-    # Poll for result — up to 10 attempts, 2 min apart
     result = None
     for attempt in range(10):
         result = _fetch_result(race_id)
@@ -198,52 +191,41 @@ def _paper_settle(race: dict, paper_bets: list, state: dict):
 
     if not result:
         logger.warning(f"Paper settle {race_label}: no result found after polling")
-        send(f"⚠️ <b>PAPER SETTLE</b> — {race_label}\nResult not available after polling.")
+        send(f"⚠️ <b>PAPER SETTLE</b> - {race_label}\nResult not available after polling.")
         return
 
-    # Infer P&L for each paper bet
-    total_pnl  = 0.0
-    icon       = "✅"
+    total_pnl   = 0.0
+    icon        = "✅"
     bet_results = []
-    lines      = [
-        f"📝 <b>PAPER SETTLED — {race_label}</b>",
-        "──────────────────────────────",
+    lines       = [
+        f"📝 <b>PAPER SETTLED - {race_label}</b>",
+        "------------------------------",
     ]
 
     for bet in paper_bets:
-        horse  = bet["horse"]
-        price  = bet["price"]
-        stake  = bet["stake"]
-        label  = bet.get("label", "")
-        pos    = _get_finish_pos(result, horse)
+        horse = bet["horse"]
+        price = bet["price"]
+        stake = bet["stake"]
+        label = bet.get("label", "")
+        pos   = _get_finish_pos(result, horse)
 
         if pos == 1:
             profit = round(stake * (price - 1) * (1 - COMMISSION), 2)
             total_pnl += profit
             won = True
-            lines.append(
-                f"✅ {label} {horse} @ {price} — "
-                f"WON 1st (+£{profit:.2f})"
-            )
+            lines.append(f"✅ {label} {horse} @ {price} - WON 1st (+£{profit:.2f})")
         elif pos is not None:
             total_pnl -= stake
             won = False
-            lines.append(
-                f"❌ {label} {horse} @ {price} — "
-                f"LOST {pos}{'st' if pos==1 else 'nd' if pos==2 else 'rd' if pos==3 else 'th'} (-£{stake:.2f})"
-            )
+            ord_s = "st" if pos==1 else "nd" if pos==2 else "rd" if pos==3 else "th"
+            lines.append(f"❌ {label} {horse} @ {price} - LOST {pos}{ord_s} (-£{stake:.2f})")
         else:
             total_pnl -= stake
             won = False
-            lines.append(
-                f"❌ {label} {horse} @ {price} — "
-                f"LOST (NR/inc) (-£{stake:.2f})"
-            )
+            lines.append(f"❌ {label} {horse} @ {price} - LOST (NR/inc) (-£{stake:.2f})")
         bet_results.append((bet, won))
 
-    # ── Log paper result to tier tracker ─────────────────────────────────────
-    # Paper trades are logged so the validation report includes simulation data
-    # alongside live bets. Failures are caught silently — never affect settlement.
+    # Log to tier tracker
     try:
         from utils.tier_tracker import log_result
         tier     = race.get("tier")
@@ -253,7 +235,7 @@ def _paper_settle(race: dict, paper_bets: list, state: dict):
             win1 = bet_results[0][1] if len(bet_results) > 0 else False
             win2 = bet_results[1][1] if len(bet_results) > 1 else False
             log_result(
-                race_id  = f"paper_{race_id}",   # prefix to avoid collision with live
+                race_id  = f"paper_{race_id}",
                 tier     = tier,
                 course   = race.get("course", "?"),
                 off      = race.get("off", "?"),
@@ -267,38 +249,44 @@ def _paper_settle(race: dict, paper_bets: list, state: dict):
     except Exception as e:
         logger.error(f"tier_tracker paper log failed for {race_label}: {e}")
 
+    # Update cumulative profit and fire any milestone notifications
+    milestone_alerts = update_cumulative_profit(state, total_pnl)
+    for alert in milestone_alerts:
+        send(alert)
+
     if total_pnl < 0:
         icon = "❌"
     elif total_pnl == 0:
         icon = "➖"
 
-    state["paper_daily_pnl"] = round(
-        state.get("paper_daily_pnl", 0.0) + total_pnl, 2
-    )
+    state["paper_daily_pnl"] = round(state.get("paper_daily_pnl", 0.0) + total_pnl, 2)
     state["paper_daily_bets"].append({
         "race":      race_label,
         "total_pnl": round(total_pnl, 2),
     })
     save(state)
 
-    sign = "+" if total_pnl >= 0 else ""
-    day_sign = "+" if state["paper_daily_pnl"] >= 0 else ""
+    cum_profit  = state.get("cumulative_profit", 0.0)
+    sign        = "+" if total_pnl >= 0 else ""
+    day_sign    = "+" if state["paper_daily_pnl"] >= 0 else ""
+    profit_sign = "+" if cum_profit >= 0 else ""
     lines += [
-        "──────────────────────────────",
-        f"Race P&L:  {sign}£{total_pnl:.2f}",
-        f"Day P&L:   {day_sign}£{state['paper_daily_pnl']:.2f}",
+        "------------------------------",
+        f"Race P&L:        {sign}£{total_pnl:.2f}",
+        f"Day P&L:         {day_sign}£{state['paper_daily_pnl']:.2f}",
+        f"Cumulative P&L:  {profit_sign}£{cum_profit:.2f}",
+        f"Next tier at:    £{_next_tier_threshold(cum_profit):.0f} profit",
     ]
     send(f"{icon} " + "\n".join(lines)[2:])
-    logger.info(f"Paper settled {race_label}: P&L {sign}£{total_pnl:.2f}")
+    logger.info(
+        f"Paper settled {race_label}: P&L {sign}£{total_pnl:.2f} "
+        f"| cumulative £{cum_profit:.2f}"
+    )
 
 
 # ── Shared market fetch ───────────────────────────────────────────────────────
 
 def _get_market(race: dict):
-    """
-    Find Betfair WIN market + live odds for a race.
-    Returns (mkt, odds, bf_runners) or (None, None, None) on failure.
-    """
     mkt, _ = find_win_market(race)
     if mkt is None:
         return None, None, None
@@ -306,13 +294,6 @@ def _get_market(race: dict):
     if not odds:
         return None, None, None
     return mkt, odds, mkt.runners or []
-
-
-def _live_price(odds: dict, sel_id: int | None) -> float | None:
-    """Return best back price for a selection, or None."""
-    if sel_id is None or not odds:
-        return None
-    return odds.get(sel_id, {}).get("back")
 
 
 # ── Live bet job ──────────────────────────────────────────────────────────────
@@ -326,21 +307,22 @@ def _live_bet_job(race: dict, state: dict):
     tier       = race.get("tier", 0)
     tsr        = is_tsr_trigger(race)
     balance    = get_balance()
+    profit     = state.get("cumulative_profit", 0.0)
+    p2_sc      = _pick2_score(race)
 
     top1   = race.get("top1") or {}
     top2   = race.get("top2") or {}
     a_name = top1.get("horse", "?")
     b_name = top2.get("horse", "?")
 
-    # Top-up / tier-change alerts
     prev_stake = state.get("_prev_tier_stake")
-    for alert in check_topup_alerts(balance, prev_stake):
+    for alert in check_topup_alerts(balance, profit, prev_stake):
         send(alert)
-    state["_prev_tier_stake"] = get_stake(balance)
+    state["_prev_tier_stake"] = get_stake(profit)
 
     mkt, odds, bf_runners = _get_market(race)
     if mkt is None:
-        send(f"⚠️ 💰 {race_label} — no Betfair market/odds found")
+        send(f"⚠️ 💰 {race_label} - no Betfair market/odds found")
         return
 
     market_id = mkt.market_id
@@ -350,12 +332,11 @@ def _live_bet_job(race: dict, state: dict):
     a_info = odds.get(a_sel_id, {}) if a_sel_id else {}
     b_info = odds.get(b_sel_id, {}) if b_sel_id else {}
 
-    # Non-runner check
     if a_info.get("status") == "REMOVED":
-        send(f"⏭️ 💰 <b>SKIP — {race_label}</b>\n⭐ Pick 1 {a_name} — REMOVED (non-runner)")
+        send(f"⏭️ 💰 <b>SKIP - {race_label}</b>\n⭐ Pick 1 {a_name} - REMOVED (non-runner)")
         return
     if b_info.get("status") == "REMOVED":
-        send(f"⏭️ 💰 <b>SKIP — {race_label}</b>\n🔵 Pick 2 {b_name} — REMOVED (non-runner)")
+        send(f"⏭️ 💰 <b>SKIP - {race_label}</b>\n🔵 Pick 2 {b_name} - REMOVED (non-runner)")
         return
 
     a_live = a_info.get("back")
@@ -363,12 +344,11 @@ def _live_bet_job(race: dict, state: dict):
     liq_a  = a_info.get("back_size", 0.0)
     liq_b  = b_info.get("back_size", 0.0)
 
-    # Tier-aware stake calculation
-    stake_a, stake_b = pick_stakes(balance, tsr, a_live, b_live, tier=tier)
+    stake_a, stake_b = pick_stakes(profit, tsr, a_live, b_live, tier=tier, pick2_score=p2_sc)
     if stake_b == 0:
         reason = (f"Pick 2 @ {b_live} below min {MIN_PICK2_PRICE}"
                   if b_live else "Pick 2 price unavailable")
-        send(f"⏭️ 💰 <b>SKIP — {race_label}</b>\n{reason}")
+        send(f"⏭️ 💰 <b>SKIP - {race_label}</b>\n{reason}")
         return
 
     redirect = stake_a == 0
@@ -376,23 +356,26 @@ def _live_bet_job(race: dict, state: dict):
         stake_a, stake_b, liq_a if not redirect else 0.0, liq_b, redirect
     )
     if skipped:
-        send(f"⏭️ 💰 <b>SKIP — {race_label}</b>\n⚠️ {liq_reason}")
+        send(f"⏭️ 💰 <b>SKIP - {race_label}</b>\n⚠️ {liq_reason}")
         return
 
     tsr_tag = " 🔥 TSR" if tsr else ""
     lines = [
-        f"💰 <b>LIVE BET — {race_label}</b>",
+        f"💰 <b>LIVE BET - {race_label}</b>",
         f"{tier_label}{tsr_tag}",
-        f"Balance: £{balance:.2f} | Tier: £{get_stake(balance):.0f}/horse",
-        "──────────────────────────────",
+        f"Balance: £{balance:.2f} | Profit: £{profit:.2f} | Tier: £{get_stake(profit):.0f}/horse",
+        "------------------------------",
     ]
 
     if redirect:
-        lines.append(f"⏭️ Pick 1 odds-on ({a_live}) — £{actual_b:.2f} redirected to Pick 2 only")
+        lines.append(
+            f"⏭️ Pick 1 odds-on ({a_live}) - £{actual_b:.2f} on Pick 2 only "
+            f"(P2 score {p2_sc} qualifies)"
+        )
     elif actual_b < stake_b:
         lines.append(
             f"⚠️ Stake reduced from £{stake_b:.0f} to £{actual_b:.0f} "
-            f"— matched to lower liquidity (P1: £{liq_a:.0f}, P2: £{liq_b:.0f})"
+            f"- matched to lower liquidity (P1: £{liq_a:.0f}, P2: £{liq_b:.0f})"
         )
 
     bets_placed    = []
@@ -403,7 +386,7 @@ def _live_bet_job(race: dict, state: dict):
             return None
         price = live_price
         if not price or price < MIN_BACK_PRICE:
-            lines.append(f"⚠️ {label}: {horse} — no viable price ({price})")
+            lines.append(f"⚠️ {label}: {horse} - no viable price ({price})")
             return None
         bet = place_back(market_id, sel_id, price, stake)
         if bet:
@@ -411,16 +394,16 @@ def _live_bet_job(race: dict, state: dict):
             matched = bet.get("size_matched", stake)
             if bet.get("pending"):
                 lines.append(
-                    f"⏳ {label}: {horse} @ {price} — order live £{stake:.2f} "
+                    f"⏳ {label}: {horse} @ {price} - order live £{stake:.2f} "
                     f"(liq: £{liq:.0f})"
                 )
             else:
                 lines.append(
-                    f"✅ {label}: {horse} @ {price} — matched £{matched:.2f} "
+                    f"✅ {label}: {horse} @ {price} - matched £{matched:.2f} "
                     f"(liq: £{liq:.0f})"
                 )
             return bet
-        lines.append(f"❌ {label}: {horse} — rejected by Betfair")
+        lines.append(f"❌ {label}: {horse} - rejected by Betfair")
         return None
 
     a_label = "⭐ Pick 1 (TSR)" if tsr else "⭐ Pick 1"
@@ -464,7 +447,6 @@ def _live_bet_job(race: dict, state: dict):
             race_off_iso, balance_before, balance_after,
             settle_bets, state,
         ),
-        # Pass race and places as kwargs so tier tracker can log correctly
         kwargs = {"race": race, "places": places},
         daemon = True,
         name   = f"Settle_{race.get('race_id', '')}",
@@ -476,11 +458,7 @@ def _live_bet_job(race: dict, state: dict):
 
 def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     """
-    Simulate bets: find the real Betfair market + live price,
-    log as paper trade, settle after race via Racing API result.
-
-    silent=True: used when running in the background during live mode.
-    Settlement notifications still fire regardless of silent.
+    Simulate bets using cumulative profit for stake tier, not Betfair balance.
     """
     off_str    = race.get("off", "?")
     course     = race.get("course", "?")
@@ -489,6 +467,8 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     tier       = race.get("tier", 0)
     tsr        = is_tsr_trigger(race)
     balance    = get_balance()
+    profit     = state.get("cumulative_profit", 0.0)
+    p2_sc      = _pick2_score(race)
 
     top1   = race.get("top1") or {}
     top2   = race.get("top2") or {}
@@ -508,12 +488,12 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     liq_a  = a_info.get("back_size", 0.0)
     liq_b  = b_info.get("back_size", 0.0)
 
-    stake_a, stake_b = pick_stakes(balance, tsr, a_live, b_live, tier=tier)
+    stake_a, stake_b = pick_stakes(profit, tsr, a_live, b_live, tier=tier, pick2_score=p2_sc)
     if stake_b == 0:
         if not silent:
             reason = (f"Pick 2 {b_name} @ {b_live} below min {MIN_PICK2_PRICE}"
-                      if b_live else f"Pick 2 {b_name} — no price")
-            send(f"⏭️ 📝 <b>PAPER SKIP — {race_label}</b>\n{reason}")
+                      if b_live else f"Pick 2 {b_name} - no price")
+            send(f"⏭️ 📝 <b>PAPER SKIP - {race_label}</b>\n{reason}")
         return
 
     redirect = stake_a == 0
@@ -525,18 +505,21 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
         actual_a, actual_b = stake_a, stake_b
 
     paper_bets = []
-    tsr_tag = " 🔥 TSR" if tsr else ""
-    lines = [
-        f"📝 <b>PAPER BET — {race_label}</b>",
+    tsr_tag    = " 🔥 TSR" if tsr else ""
+    lines      = [
+        f"📝 <b>PAPER BET - {race_label}</b>",
         f"{tier_label}{tsr_tag}",
-        f"Balance: £{balance:.2f} | Tier: £{get_stake(balance):.0f}/horse",
-        "──────────────────────────────",
+        f"Balance: £{balance:.2f} | Profit: £{profit:.2f} | Tier: £{get_stake(profit):.0f}/horse",
+        "------------------------------",
     ]
     if not mkt_ok:
-        lines.append("⚠️ No Betfair market — using RA odds")
+        lines.append("⚠️ No Betfair market - using RA odds")
 
     if redirect:
-        lines.append(f"⏭️ Pick 1 odds-on ({a_live}) — £{actual_b:.2f} redirected to Pick 2 only")
+        lines.append(
+            f"⏭️ Pick 1 odds-on ({a_live}) - £{actual_b:.2f} on Pick 2 only "
+            f"(P2 score {p2_sc} qualifies)"
+        )
     elif actual_b < stake_b and mkt_ok:
         lines.append(
             f"⚠️ Stake reduced from £{stake_b:.0f} to £{actual_b:.0f} "
@@ -548,12 +531,12 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
             return
         if price and price > 1:
             lines.append(
-                f"📝 {label}: {horse} @ {price:.2f} — paper £{stake:.2f}"
+                f"📝 {label}: {horse} @ {price:.2f} - paper £{stake:.2f}"
                 + (f" (liq: £{liq:.0f})" if mkt_ok and liq else "")
             )
             paper_bets.append({"horse": horse, "price": price, "stake": stake, "label": label})
         else:
-            lines.append(f"⚠️ {label}: {horse} — no usable price")
+            lines.append(f"⚠️ {label}: {horse} - no usable price")
 
     a_label = "⭐ Pick 1 (TSR)" if tsr else "⭐ Pick 1"
     _log(a_name, actual_a, a_live, liq_a, a_label)
@@ -577,18 +560,18 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     t.start()
 
 
-# ── Unified bet job (routes to paper or live) ─────────────────────────────────
+# ── Unified bet job ───────────────────────────────────────────────────────────
 
 def bet_job(race: dict, state: dict):
     if state.get("betting_paused", False):
-        logger.info(f"Paused — skipping {race.get('off')} {race.get('course')}")
+        logger.info(f"Paused - skipping {race.get('off')} {race.get('course')}")
         return
 
     now_utc = datetime.now(timezone.utc)
     off_utc = _to_utc(race.get("off_dt", ""))
     if off_utc and now_utc >= off_utc:
         send(
-            f"⏭️ <b>MISSED</b> — {race.get('off')} {race.get('course')}\n"
+            f"⏭️ <b>MISSED</b> - {race.get('off')} {race.get('course')}\n"
             f"Race already started at job fire time."
         )
         return
@@ -606,6 +589,7 @@ def bet_job(race: dict, state: dict):
 def end_of_day_job(state: dict):
     logger.info("end_of_day_job")
     bal        = get_balance()
+    profit     = state.get("cumulative_profit", 0.0)
     today      = date.today().strftime("%A %-d %B %Y")
     mode       = state.get("mode", "paper").upper()
 
@@ -616,52 +600,53 @@ def end_of_day_job(state: dict):
     live_wins  = sum(1 for b in live_bets  if b.get("total_pnl", 0) > 0)
     paper_wins = sum(1 for b in paper_bets if b.get("total_pnl", 0) > 0)
 
+    profit_sign = "+" if profit >= 0 else ""
     lines = [
-        f"📋 <b>BETFAIR DAILY SUMMARY — {today}</b>",
+        f"📋 <b>BETFAIR DAILY SUMMARY - {today}</b>",
         f"Mode: {mode}",
-        "══════════════════════════════",
-        f"Balance: £{bal:.2f}",
+        "==============================",
+        f"Balance:          £{bal:.2f}",
+        f"Cumulative P&L:   {profit_sign}£{profit:.2f}",
+        f"Current tier:     £{get_stake(profit):.0f}/horse",
+        f"Next tier at:     £{_next_tier_threshold(profit):.0f} profit",
     ]
 
     if paper_bets:
         sign = "+" if paper_pnl >= 0 else ""
         lines += [
-            "── 📝 Paper ──────────────────────",
+            "-- 📝 Paper ------------------",
             f"Races: {len(paper_bets)} | Wins: {paper_wins} | Losses: {len(paper_bets)-paper_wins}",
             f"P&L: {sign}£{paper_pnl:.2f}",
         ]
         for b in paper_bets:
             icon = "✅" if b.get("total_pnl", 0) > 0 else "❌"
             sign = "+" if b.get("total_pnl", 0) >= 0 else ""
-            lines.append(f"  {icon} {b['race']} → {sign}£{b['total_pnl']:.2f}")
+            lines.append(f"  {icon} {b['race']} - {sign}£{b['total_pnl']:.2f}")
 
     if live_bets:
         sign = "+" if live_pnl >= 0 else ""
         lines += [
-            "── 💰 Live ───────────────────────",
+            "-- 💰 Live -------------------",
             f"Races: {len(live_bets)} | Wins: {live_wins} | Losses: {len(live_bets)-live_wins}",
             f"P&L: {sign}£{live_pnl:.2f}",
         ]
         for b in live_bets:
             icon = "✅" if b.get("total_pnl", 0) > 0 else "❌"
             sign = "+" if b.get("total_pnl", 0) >= 0 else ""
-            lines.append(f"  {icon} {b['race']} → {sign}£{b['total_pnl']:.2f}")
+            lines.append(f"  {icon} {b['race']} - {sign}£{b['total_pnl']:.2f}")
 
-    # ── Tier tracker EOD summary ──────────────────────────────────────────────
-    # Appended after the P&L summary so it appears at the bottom of the
-    # EOD Telegram message. Catches all errors silently.
     try:
         from utils.tier_tracker import get_eod_summary
         tracker_summary = get_eod_summary()
         if tracker_summary:
-            lines += ["══════════════════════════════", tracker_summary]
+            lines += ["==============================", tracker_summary]
     except Exception as e:
         logger.error(f"tier_tracker EOD summary failed: {e}")
 
     lines += [
-        "──────────────────────────────",
-        f"Tomorrow's stake: {stake_display(bal)}",
-        "══════════════════════════════",
+        "------------------------------",
+        f"Tomorrow's stake: {stake_display(profit)}",
+        "==============================",
     ]
     send_chunks("\n".join(lines))
 
@@ -672,6 +657,7 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
     races      = _load_today()
     now        = datetime.now()
     bal        = get_balance()
+    profit     = state.get("cumulative_profit", 0.0)
     mode       = state.get("mode", "paper").upper()
     qualifying = [r for r in races if qualifies(r)]
     scheduled  = 0
@@ -708,7 +694,6 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             )
 
     if send_briefing:
-        tsr_count = sum(1 for r in qualifying if is_tsr_trigger(r))
         paused    = state.get("betting_paused", False)
         muted     = state.get("muted", False)
         mode_icon = "💰" if mode == "LIVE" else "📝"
@@ -716,26 +701,29 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
         paper_pnl = state.get("paper_daily_pnl", 0.0)
 
         tsr_count  = sum(1 for r in qualifying if is_tsr_trigger(r))
-        tier_counts: dict[str, int] = {}
+        tier_counts = {}
         for r in qualifying:
             label = (r.get("tier_label") or "·").split()[0]
             tier_counts[label] = tier_counts.get(label, 0) + 1
-        tier_summary = " | ".join(f"{v}×{k}" for k, v in tier_counts.items())
+        tier_summary = " | ".join(f"{v}x{k}" for k, v in tier_counts.items())
 
+        profit_sign = "+" if profit >= 0 else ""
         lines = [
             f"🤖 <b>BETFAIR BOT v3</b> {mode_icon} {mode}",
-            "══════════════════════════════",
-            f"Balance:       £{bal:.2f}",
-            f"Betting:       {'⏸️ PAUSED' if paused else '▶️ ACTIVE'}",
-            f"Notifications: {'🔕 MUTED' if muted else '🔔 ON'}",
-            f"Stake:         {stake_display(bal)}",
-            f"Live P&L:      {'+' if live_pnl >= 0 else ''}£{live_pnl:.2f}",
-            f"Paper P&L:     {'+' if paper_pnl >= 0 else ''}£{paper_pnl:.2f}",
-            "──────────────────────────────",
+            "==============================",
+            f"Balance:          £{bal:.2f}",
+            f"Cumulative P&L:   {profit_sign}£{profit:.2f}",
+            f"Current tier:     £{get_stake(profit):.0f}/horse",
+            f"Next tier at:     £{_next_tier_threshold(profit):.0f} profit",
+            f"Betting:          {'⏸️ PAUSED' if paused else '▶️ ACTIVE'}",
+            f"Notifications:    {'🔕 MUTED' if muted else '🔔 ON'}",
+            f"Live P&L:         {'+' if live_pnl >= 0 else ''}£{live_pnl:.2f}",
+            f"Paper P&L:        {'+' if paper_pnl >= 0 else ''}£{paper_pnl:.2f}",
+            "------------------------------",
             f"Qualifying: {len(qualifying)} | Scheduled: {scheduled}",
             f"Tiers: {tier_summary or 'none'}",
-            f"Filters: Turf | Not Heavy | Not Irish staying chase (soft/heavy) | Good/Skip → £2 cap",
-            "──────────────────────────────",
+            f"Filters: Turf | Not Heavy | Not Irish staying chase | Good/Skip capped",
+            "------------------------------",
         ]
         for r in sorted(qualifying, key=lambda x: x.get("off", "99:99")):
             top1    = r.get("top1") or {}
@@ -744,11 +732,15 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             tsr_m   = " 🔥" if is_tsr_trigger(r) else ""
             a_price = top1.get("sp_dec")
             b_price = top2.get("sp_dec")
-            s_a, s_b = pick_stakes(bal, is_tsr_trigger(r), a_price, b_price, tier=r.get("tier", 0))
+            p2_sc   = _pick2_score(r)
+            s_a, s_b = pick_stakes(
+                profit, is_tsr_trigger(r), a_price, b_price,
+                tier=r.get("tier", 0), pick2_score=p2_sc
+            )
             off_dt  = _parse_off_dt(r)
             bet_at  = (off_dt - timedelta(minutes=10)).strftime("%H:%M") if off_dt else "?"
             p1_note = " (odds-on→skip)" if (a_price and a_price < MIN_PICK1_PRICE) else ""
-            p2_note = " (⚠️ under 3/1)" if (b_price and b_price < MIN_PICK2_PRICE) else ""
+            p2_note = " (under 3/1)" if (b_price and b_price < MIN_PICK2_PRICE) else ""
             lines.append(
                 f"{badge} <b>{r.get('off','?')} {r.get('course','?')}</b>{tsr_m}"
                 f" [bet@{bet_at}]\n"
@@ -757,10 +749,13 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             )
         if not qualifying:
             lines.append("No qualifying races today.")
-        lines.append("══════════════════════════════")
+        lines.append("==============================")
         send_chunks("\n".join(lines))
 
-    logger.info(f"startup: {scheduled} scheduled, mode={mode}, balance=£{bal:.2f}")
+    logger.info(
+        f"startup: {scheduled} scheduled, mode={mode}, "
+        f"balance=£{bal:.2f}, profit=£{profit:.2f}"
+    )
 
 
 def _midnight_job(scheduler: BackgroundScheduler, state: dict):
@@ -774,6 +769,7 @@ def _midday_refresh(scheduler: BackgroundScheduler, state: dict):
     races      = _load_today()
     now        = datetime.now()
     bal        = get_balance()
+    profit     = state.get("cumulative_profit", 0.0)
     qualifying = [r for r in races if qualifies(r)]
     scheduled  = 0
     for race in qualifying:
@@ -792,8 +788,8 @@ def _midday_refresh(scheduler: BackgroundScheduler, state: dict):
         scheduled += 1
     mode = state.get("mode", "paper").upper()
     send(
-        f"🔄 <b>Midday refresh</b> — {scheduled} races scheduled\n"
-        f"Mode: {mode} | Balance: £{bal:.2f} | {stake_display(bal)}"
+        f"🔄 <b>Midday refresh</b> - {scheduled} races scheduled\n"
+        f"Mode: {mode} | Balance: £{bal:.2f} | Profit: £{profit:.2f} | {stake_display(profit)}"
     )
 
 
