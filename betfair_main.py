@@ -57,18 +57,26 @@ from predict             import place_terms
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 os.makedirs("logs", exist_ok=True)
+# Replace the current basicConfig block with this:
+_log_handler_file   = logging.FileHandler("logs/betfair.log")
+_log_handler_stdout = logging.StreamHandler(sys.stdout)
+_log_formatter      = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+_log_handler_file.setFormatter(_log_formatter)
+_log_handler_stdout.setFormatter(_log_formatter)
+
+# Only configure the root logger if it has no handlers yet
 root_logger = logging.getLogger()
 if not root_logger.handlers:
-    logging.basicConfig(
-        level    = logging.INFO,
-        format   = "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers = [
-            logging.FileHandler("logs/betfair.log"),
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(_log_handler_file)
+    root_logger.addHandler(_log_handler_stdout)
 else:
-    logging.getLogger().setLevel(logging.INFO)
+    # Root logger already configured by main.py — add betfair file handler only
+    betfair_logger = logging.getLogger("betfair_main")
+    betfair_logger.propagate = False
+    betfair_logger.setLevel(logging.INFO)
+    betfair_logger.addHandler(_log_handler_file)
+    betfair_logger.addHandler(_log_handler_stdout)
 logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
 logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 
