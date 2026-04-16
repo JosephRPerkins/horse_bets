@@ -132,7 +132,7 @@ def race_confidence(race, win_score):
     cls_12    = cls in ("Class 1", "Class 2")
     long_dist = (dist_f or 0) >= 14
     small_fld = n <= 7
-    big_fld   = n >= 12
+    big_fld   = n >= 13
 
     # Determine if there's an odds-on favourite
     finishers = [r for r in runners if is_numeric(r.get("position", ""))]
@@ -155,13 +155,13 @@ def race_confidence(race, win_score):
     # tiers are unreliable. Cap at STANDARD with a clear warning.
     blind_note = f"⚠ ratings only {cov:.0%} — SP-based only"
 
-    # ── SKIP conditions ───────────────────────────────────────────────────────
+# ── SKIP conditions ───────────────────────────────────────────────────────
     if cls_12:
         return TIER_SKIP, ["Class 1/2 — highly competitive, model unreliable"]
-    if big_fld and not is_jump:
+    if n >= 13 and not is_jump:
         return TIER_SKIP, [f"Field of {n} — too many runners for reliable prediction"]
-    if is_flat and is_aw and win_score < 6:
-        return TIER_SKIP, ["Flat/AW + low score — historically weakest category"]
+    if is_aw and win_score < 6:
+        return TIER_SKIP, ["AW + low score — historically weakest category"]
 
     # ── SUPREME ───────────────────────────────────────────────────────────────
     # TSR solo is a direct value comparison — valid even when coverage is low,
