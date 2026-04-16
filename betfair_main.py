@@ -19,8 +19,14 @@ Staking: WINNINGS-DRIVEN (not balance-driven)
 Place bets (paper only):
   A 2 place bet is simulated alongside every win bet using the live
   Betfair place market price. Settled on conservative place terms
-  (standard + 1 place). Tracked separately in Telegram output so
-  win and place P&L can be assessed independently before going live.
+  (standard + 1). Tracked separately in Telegram output.
+
+Streak tracker:
+  Uses actual Betfair place market prices captured at bet time.
+  Tracks both standard and conservative compounding streaks.
+  Fires a Telegram update after every race settlement.
+
+Bet timing: T-5 minutes before race off.
 
 Usage:
     python betfair_main.py
@@ -76,6 +82,9 @@ logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 logger    = logging.getLogger("betfair_main")
 CARD_PATH = os.path.join(config.DIR_CARDS, "today.json")
 
+# Minutes before race off to place bets
+BET_BEFORE_MINUTES = 5
+
 
 # ── Card loading ──────────────────────────────────────────────────────────────
 
@@ -112,7 +121,7 @@ def _race_places(race: dict) -> int:
 
 
 def _race_cons_places(race: dict) -> int:
-    """Conservative place terms = standard + 1, used for place bet settlement."""
+    """Conservative place terms = standard + 1."""
     return min(_race_places(race) + 1, max(
         (len(race.get("runners", [])) or race.get("field_size", 0) or 1) - 1, 1
     ))
@@ -167,13 +176,15 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
                   place_bets: list = None):
     """
     Daemon thread - waits until race_off + 15 minutes, polls Racing API
-    for result, calculates win and place P&L separately, fires milestones.
+    for result, calculates win and place P&L, fires streak tracker update.
 
     paper_bets: win market bets [{horse, price, stake, label}]
     place_bets: place market bets [{horse, price, stake, cons_places}] or None
     """
-    race_label = f"{race.get('off','?')} {race.get('course','?')}"
-    race_id    = race.get("race_id", "")
+    race_label  = f"{race.get('off','?')} {race.get('course','?')}"
+    race_id     = race.get("race_id", "")
+    std_places  = _race_places(race)
+    cons_places = _race_cons_places(race)
 
     off_dt_str = race.get("off_dt", "")
     try:
@@ -241,42 +252,96 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
         bet_results.append((bet, won))
 
     # ── Place bet settlement ──────────────────────────────────────────────────
-    # Settled on conservative place terms (standard + 1).
-    # Tracked separately so place P&L can be assessed independently.
-    place_pnl = 0.0
+    place_pnl  = 0.0
+    std_win    = False
+    cons_win   = False
+
     if place_bets:
         lines.append("------------------------------")
         lines.append("📍 <b>Place bets</b>")
+
+        # Both picks must place for a streak win
+        picks_placed_std  = []
+        picks_placed_cons = []
+
         for bet in place_bets:
             horse       = bet["horse"]
             price       = bet["price"]
             stake       = bet["stake"]
-            cons_places = bet.get("cons_places", 3)
+            c_places    = bet.get("cons_places", cons_places)
             pos         = _get_finish_pos(result, horse)
 
-            if pos is not None and pos <= cons_places:
+            # Conservative settle
+            if pos is not None and pos <= c_places:
                 profit = round(stake * (price - 1) * (1 - COMMISSION), 2)
                 place_pnl += profit
+                picks_placed_cons.append(True)
                 lines.append(
-                    f"✅ 📍 {horse} @ {price:.2f} - PLACED top {cons_places} (+£{profit:.2f})"
+                    f"✅ 📍 {horse} @ {price:.2f} - PLACED top {c_places} (+£{profit:.2f})"
                 )
             else:
                 place_pnl -= stake
+                picks_placed_cons.append(False)
                 pos_s = f"{pos}th" if pos else "NR/inc"
                 lines.append(
                     f"❌ 📍 {horse} @ {price:.2f} - UNPLACED {pos_s} (-£{stake:.2f})"
                 )
 
+            # Standard settle (one fewer place)
+            if pos is not None and pos <= std_places:
+                picks_placed_std.append(True)
+            else:
+                picks_placed_std.append(False)
+
+        # Streak wins require BOTH picks to place
+        std_win  = len(picks_placed_std)  >= 2 and all(picks_placed_std[:2])
+        cons_win = len(picks_placed_cons) >= 2 and all(picks_placed_cons[:2])
+
         state["paper_place_pnl"] = round(
             state.get("paper_place_pnl", 0.0) + place_pnl, 2
         )
+
+    # ── Streak tracker ────────────────────────────────────────────────────────
+    # Uses real Betfair place prices captured at bet time.
+    # Falls back to SP-based estimation if place prices unavailable.
+    try:
+        from notifications.streak_tracker import update_from_betfair, update as streak_update_sp
+        from betfair.notify import send_results
+
+        streak_msg = None
+        outcome    = {"std_win": std_win, "cons_win": cons_win}
+
+        if place_bets and len(place_bets) >= 2:
+            # Use real Betfair place prices
+            streak_msg = update_from_betfair(
+                race          = race,
+                outcome       = outcome,
+                horse_a_name  = place_bets[0]["horse"],
+                horse_b_name  = place_bets[1]["horse"],
+                place_price_a = place_bets[0]["price"],
+                place_price_b = place_bets[1]["price"],
+                std_places    = std_places,
+                cons_places   = cons_places,
+            )
+        elif len(paper_bets) >= 2:
+            # Fallback: SP-based estimation
+            horse_a = {"horse": paper_bets[0]["horse"], "sp_dec": paper_bets[0]["price"]}
+            horse_b = {"horse": paper_bets[1]["horse"], "sp_dec": paper_bets[1]["price"]}
+            race_with_places = {**race, "places": std_places, "cons_places": cons_places}
+            streak_msg = streak_update_sp(race_with_places, outcome,
+                                          horse_a=horse_a, horse_b=horse_b)
+
+        if streak_msg:
+            send_results(streak_msg)
+
+    except Exception as e:
+        logger.error(f"streak_tracker failed for {race_label}: {e}")
 
     # ── Tier tracker ─────────────────────────────────────────────────────────
     try:
         from utils.tier_tracker import log_result
         tier     = race.get("tier")
         tsr_solo = race.get("tsr_solo", False)
-        places   = _race_places(race)
         if tier is not None and len(bet_results) >= 1:
             win1 = bet_results[0][1] if len(bet_results) > 0 else False
             win2 = bet_results[1][1] if len(bet_results) > 1 else False
@@ -289,7 +354,7 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
                 pick2    = paper_bets[1]["horse"] if len(paper_bets) > 1 else "?",
                 win1     = win1,
                 win2     = win2,
-                places   = places,
+                places   = std_places,
                 tsr_solo = tsr_solo,
             )
     except Exception as e:
@@ -312,13 +377,13 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     })
     save(state)
 
-    cum_profit       = state.get("cumulative_profit", 0.0)
-    day_place_pnl    = state.get("paper_place_pnl", 0.0)
-    sign             = "+" if total_pnl >= 0 else ""
-    place_sign       = "+" if place_pnl >= 0 else ""
-    day_sign         = "+" if state["paper_daily_pnl"] >= 0 else ""
-    day_place_sign   = "+" if day_place_pnl >= 0 else ""
-    profit_sign      = "+" if cum_profit >= 0 else ""
+    cum_profit     = state.get("cumulative_profit", 0.0)
+    day_place_pnl  = state.get("paper_place_pnl", 0.0)
+    sign           = "+" if total_pnl >= 0 else ""
+    place_sign     = "+" if place_pnl >= 0 else ""
+    day_sign       = "+" if state["paper_daily_pnl"] >= 0 else ""
+    day_place_sign = "+" if day_place_pnl >= 0 else ""
+    profit_sign    = "+" if cum_profit >= 0 else ""
 
     lines += ["------------------------------"]
     lines.append(f"Win P&L:         {sign}£{total_pnl:.2f}")
@@ -513,13 +578,8 @@ def _live_bet_job(race: dict, state: dict):
 
 def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     """
-    Simulate win bets and place bets using cumulative profit for stake tier.
-
-    Win bets: back to win on win market at tier stake.
-    Place bets: back to place on place market at 2 fixed stake.
-                Uses live Betfair place market prices (not calculated 1/4 odds).
-                Settled on conservative place terms (standard + 1).
-                Tracked separately so win and place P&L can be compared.
+    Simulate win and place bets. Place bets use live Betfair place market prices.
+    Place prices are stored and passed to settlement for streak tracker.
     """
     off_str    = race.get("off", "?")
     course     = race.get("course", "?")
@@ -610,12 +670,10 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
         return
 
     # ── Place market bets ─────────────────────────────────────────────────────
-    # Fetch live Betfair place market prices for each pick.
-    # Fixed stake of 2 per horse regardless of win stake tier.
-    # Uses conservative place terms (standard + 1 place).
-    # Only runs in non-silent mode (paper foreground, not background during live).
-    place_bets    = []
-    cons_places   = _race_cons_places(race)
+    # Fetch live place prices. Stored with bets so settlement can use real
+    # prices for streak tracker rather than estimating from win SP.
+    place_bets  = []
+    cons_places = _race_cons_places(race)
 
     if not silent:
         try:
@@ -624,7 +682,6 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                 place_odds_map = get_market_odds(place_mkt.market_id)
                 place_runners  = place_mkt.runners or []
 
-                # Only back horses that are in our win bets
                 for win_bet in paper_bets:
                     horse  = win_bet["horse"]
                     sel_id = find_selection_id(horse, place_runners)
@@ -646,14 +703,11 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                     lines.append("------------------------------")
                     lines.append(f"📍 <b>Place bets (£2 each, top {cons_places})</b>")
                     for pb in place_bets:
-                        lines.append(
-                            f"  📍 {pb['horse']} @ {pb['price']:.2f}"
-                            + (f" (liq: £{p_liq:.0f})" if p_liq else "")
-                        )
+                        lines.append(f"  📍 {pb['horse']} @ {pb['price']:.2f}")
                 else:
                     lines.append("📍 Place market found but no prices available")
             else:
-                lines.append("📍 No place market found for this race")
+                lines.append("📍 No place market found")
         except Exception as e:
             logger.warning(f"Place market lookup failed for {race_label}: {e}")
             lines.append("📍 Place market lookup failed")
@@ -699,18 +753,18 @@ def bet_job(race: dict, state: dict):
 
 def end_of_day_job(state: dict):
     logger.info("end_of_day_job")
-    bal           = get_balance()
-    profit        = state.get("cumulative_profit", 0.0)
-    today         = date.today().strftime("%A %-d %B %Y")
-    mode          = state.get("mode", "paper").upper()
+    bal         = get_balance()
+    profit      = state.get("cumulative_profit", 0.0)
+    today       = date.today().strftime("%A %-d %B %Y")
+    mode        = state.get("mode", "paper").upper()
 
-    live_bets     = state.get("daily_bets", [])
-    live_pnl      = state.get("daily_pnl", 0.0)
-    paper_bets    = state.get("paper_daily_bets", [])
-    paper_pnl     = state.get("paper_daily_pnl", 0.0)
-    paper_place   = state.get("paper_place_pnl", 0.0)
-    live_wins     = sum(1 for b in live_bets  if b.get("total_pnl", 0) > 0)
-    paper_wins    = sum(1 for b in paper_bets if b.get("total_pnl", 0) > 0)
+    live_bets   = state.get("daily_bets", [])
+    live_pnl    = state.get("daily_pnl", 0.0)
+    paper_bets  = state.get("paper_daily_bets", [])
+    paper_pnl   = state.get("paper_daily_pnl", 0.0)
+    paper_place = state.get("paper_place_pnl", 0.0)
+    live_wins   = sum(1 for b in live_bets  if b.get("total_pnl", 0) > 0)
+    paper_wins  = sum(1 for b in paper_bets if b.get("total_pnl", 0) > 0)
 
     profit_sign = "+" if profit >= 0 else ""
     lines = [
@@ -736,7 +790,7 @@ def end_of_day_job(state: dict):
             f"Combined:  {comb_sign}£{combined:.2f}",
         ]
         for b in paper_bets:
-            icon = "✅" if b.get("total_pnl", 0) > 0 else "❌"
+            icon   = "✅" if b.get("total_pnl", 0) > 0 else "❌"
             b_sign = "+" if b.get("total_pnl", 0) >= 0 else ""
             lines.append(f"  {icon} {b['race']} - {b_sign}£{b['total_pnl']:.2f}")
 
@@ -759,6 +813,14 @@ def end_of_day_job(state: dict):
             lines += ["==============================", tracker_summary]
     except Exception as e:
         logger.error(f"tier_tracker EOD summary failed: {e}")
+
+    try:
+        from notifications.streak_tracker import get_eod_summary as streak_eod
+        streak_summary = streak_eod()
+        if streak_summary:
+            lines += ["==============================", streak_summary]
+    except Exception as e:
+        logger.error(f"streak_tracker EOD summary failed: {e}")
 
     lines += [
         "------------------------------",
@@ -784,7 +846,7 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
         off_dt = _parse_off_dt(race)
         if off_dt is None:
             continue
-        bet_time = off_dt - timedelta(minutes=10)
+        bet_time = off_dt - timedelta(minutes=BET_BEFORE_MINUTES)
         if bet_time <= now:
             continue
 
@@ -836,6 +898,7 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             f"Notifications:    {'🔕 MUTED' if muted else '🔔 ON'}",
             f"Live P&L:         {'+' if live_pnl >= 0 else ''}£{live_pnl:.2f}",
             f"Paper P&L:        {'+' if paper_pnl >= 0 else ''}£{paper_pnl:.2f}",
+            f"Bet timing:       T-{BET_BEFORE_MINUTES} mins",
             "------------------------------",
             f"Qualifying: {len(qualifying)} | Scheduled: {scheduled}",
             f"Tiers: {tier_summary or 'none'}",
@@ -855,7 +918,7 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
                 tier=r.get("tier", 0), pick2_score=p2_sc
             )
             off_dt  = _parse_off_dt(r)
-            bet_at  = (off_dt - timedelta(minutes=10)).strftime("%H:%M") if off_dt else "?"
+            bet_at  = (off_dt - timedelta(minutes=BET_BEFORE_MINUTES)).strftime("%H:%M") if off_dt else "?"
             p1_note = " (odds-on→skip)" if (a_price and a_price < MIN_PICK1_PRICE) else ""
             p2_note = " (under 3/1)" if (b_price and b_price < MIN_PICK2_PRICE) else ""
             lines.append(
@@ -878,6 +941,11 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
 def _midnight_job(scheduler: BackgroundScheduler, state: dict):
     logger.info("midnight_job")
     state = reset_daily(state)
+    try:
+        from notifications.streak_tracker import reset_streaks
+        reset_streaks()
+    except Exception as e:
+        logger.error(f"streak_tracker reset failed: {e}")
     startup(scheduler, state, send_briefing=True)
 
 
@@ -892,7 +960,7 @@ def _midday_refresh(scheduler: BackgroundScheduler, state: dict):
     for race in qualifying:
         off_dt   = _parse_off_dt(race)
         if off_dt is None: continue
-        bet_time = off_dt - timedelta(minutes=10)
+        bet_time = off_dt - timedelta(minutes=BET_BEFORE_MINUTES)
         if bet_time <= now: continue
         def _make_job(r, s):
             return lambda: bet_job(r, s)
