@@ -339,7 +339,6 @@ def _send_result(race: dict, result: dict):
     # Streak tracker moved to betfair_main._paper_settle()
     # Uses real Betfair place prices instead of SP estimation.
     # Do not call here.
-    pass
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
