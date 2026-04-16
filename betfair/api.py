@@ -7,6 +7,11 @@ Uses betfairlightweight under the hood.
 
 All public functions log errors and return safe defaults on failure —
 callers should always check for None / empty dict returns.
+
+Place market support added — find_place_market() works identically to
+find_win_market() but queries the PLACE market type. Place market odds
+are read directly from Betfair rather than calculated as 1/4 of win odds,
+so they reflect actual exchange prices.
 """
 
 import logging
@@ -101,19 +106,20 @@ def _to_local_naive(utc_dt: datetime) -> datetime:
 
 # ── Market discovery ──────────────────────────────────────────────────────────
 
-def find_win_market(race: dict):
+def _find_market(race: dict, market_type: str):
     """
-    Find the Betfair WIN market for a race.
+    Internal: find a Betfair market of the given type for a race.
+    market_type: "WIN" or "PLACE"
     Returns (MarketCatalogue, diff_seconds) or (None, None).
     """
     from betfairlightweight.filters import market_filter, time_range
 
     off_dt = _to_utc(race.get("off_dt"))
     if off_dt is None:
-        logger.warning(f"find_win_market: no off_dt for {race.get('course')}")
+        logger.warning(f"_find_market: no off_dt for {race.get('course')}")
         return None, None
 
-    course = _norm_course(race.get("course", ""))
+    course  = _norm_course(race.get("course", ""))
     from_dt = off_dt - timedelta(minutes=10)
     to_dt   = off_dt + timedelta(minutes=10)
 
@@ -122,17 +128,17 @@ def find_win_market(race: dict):
             filter=market_filter(
                 event_type_ids    = ["7"],
                 market_countries  = ["GB", "IE"],
-                market_type_codes = ["WIN"],
+                market_type_codes = [market_type],
                 market_start_time = time_range(
                     from_=from_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
                     to   =to_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 ),
             ),
-            market_projection = ["MARKET_START_TIME", "RUNNER_DESCRIPTION", "EVENT"],
+            market_projection = ["MARKET_START_TIME", "RUNNER_DESCRIPTION", "EVENT", "MARKET_DESCRIPTION"],
             max_results       = 20,
         )
     except Exception as e:
-        logger.error(f"find_win_market catalogue error: {e}")
+        logger.error(f"_find_market {market_type} catalogue error: {e}")
         return None, None
 
     best_mkt   = None
@@ -159,8 +165,8 @@ def find_win_market(race: dict):
             best_diff  = diff
 
     if best_score < 2:
-        logger.warning(
-            f"find_win_market: no confident match for "
+        logger.debug(
+            f"_find_market {market_type}: no confident match for "
             f"{race.get('off')} {race.get('course')} (best_score={best_score})"
         )
         return None, None
@@ -168,9 +174,62 @@ def find_win_market(race: dict):
     return best_mkt, best_diff
 
 
+def find_win_market(race: dict):
+    """
+    Find the Betfair WIN market for a race.
+    Returns (MarketCatalogue, diff_seconds) or (None, None).
+    """
+    return _find_market(race, "WIN")
+
+
+def find_place_market(race: dict):
+    """
+    Find the Betfair PLACE market for a race.
+    Returns (MarketCatalogue, diff_seconds) or (None, None).
+
+    Place markets exist for most UK/IRE races with 5+ runners.
+    Odds are live exchange prices — not calculated as 1/4 of win odds.
+    The market description contains Betfair's place terms (e.g. 3 places).
+    """
+    return _find_market(race, "PLACE")
+
+
+def get_place_terms(market_catalogue) -> int:
+    """
+    Extract the number of places from a Betfair place market catalogue entry.
+    Returns the number of places (e.g. 2, 3, 4) or 0 if unavailable.
+
+    Betfair encodes place terms in the market description string,
+    e.g. "Each Way Terms: 3 places at 1/4 odds"
+    """
+    if market_catalogue is None:
+        return 0
+    try:
+        desc = getattr(market_catalogue, "description", None)
+        if desc is None:
+            return 0
+        # Try to read from clarifications field
+        clarifications = getattr(desc, "clarifications", "") or ""
+        if clarifications:
+            import re as _re
+            match = _re.search(r"(\d+)\s+place", clarifications, _re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+        # Try market name as fallback
+        name = getattr(market_catalogue, "market_name", "") or ""
+        import re as _re
+        match = _re.search(r"(\d+)\s+place", name, _re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    except Exception as e:
+        logger.debug(f"get_place_terms failed: {e}")
+    return 0
+
+
 def get_market_odds(market_id: str) -> dict:
     """
     Return {selection_id: {back, back_size, lay, lay_size, status}} for all runners.
+    Works for both WIN and PLACE markets.
     """
     try:
         books = get_client().betting.list_market_book(
@@ -236,11 +295,10 @@ def place_back(market_id: str, selection_id: int,
                price: float, stake: float) -> dict | None:
     """
     Place a back bet on the exchange.
+    Works for both WIN and PLACE markets — just pass the appropriate market_id.
     Returns bet dict on success, None on failure.
     bet dict keys: type, selection_id, price, size, size_matched, bet_id, pending
     """
-    # No artificial minimum enforced here — caller controls stake via liquidity
-    # check. If Betfair rejects it as below their minimum, the error is logged.
     valid_price = _round_betfair_price(price)
 
     try:
