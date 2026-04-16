@@ -168,11 +168,29 @@ def should_back_pick2(pick2_price, tier: int = TIER_STD) -> bool:
         return True
     return pick2_price >= MIN_PICK2_PRICE
 
+def is_two_horse_race(pick1_price, pick2_price, pick3_price) -> bool:
+    """
+    Returns True when the market identifies this as effectively a two-horse race.
+    Conditions:
+      - Pick 1 is odds-on (< 2.0)
+      - Pick 2 is short but not odds-on (< MIN_PICK2_PRICE)
+      - Pick 3 is at least 3x the price of Pick 2
+    This catches races where both top picks are short but the rest of
+    the field is a long way back — high confidence place opportunity.
+    """
+    if not pick1_price or not pick2_price or not pick3_price:
+        return False
+    return (
+        pick1_price < MIN_PICK1_PRICE          # P1 odds-on
+        and pick2_price < MIN_PICK2_PRICE      # P2 short
+        and pick3_price >= pick2_price * 3.0   # P3 well behind
+    )
 
 def pick_stakes(profit: float, tsr: bool,
                 pick1_price, pick2_price,
                 tier: int = TIER_STD,
-                pick2_score: int = 0) -> tuple:
+                pick2_score: int = 0,
+                pick3_price = None) -> tuple:
     """
     Return (stake_pick1, stake_pick2).
 
@@ -197,6 +215,15 @@ def pick_stakes(profit: float, tsr: bool,
     p1_odds_on   = pick1_price is not None and pick1_price < MIN_PICK1_PRICE
     p2_ok        = pick2_price is not None and pick2_price >= MIN_PICK2_PRICE
 
+    # ── Two-horse race: place only ────────────────────────────────────────────
+    # When both picks are short but the field drops away sharply,
+    # skip win bets but signal place-only via sentinel (-1, -1).
+    # Only fires for GOOD, STRONG, SUPREME — not STANDARD/SKIP.
+    pick3_price = kwargs.get("pick3_price")
+    if (tier in {TIER_GOOD, TIER_STRONG, TIER_SUPREME}
+            and is_two_horse_race(pick1_price, pick2_price, pick3_price)):
+        return -1.0, -1.0
+              
     # ── SUPREME ───────────────────────────────────────────────────────────────
     # Always back Pick 1 at any price. Pick 2 only if price viable.
     if tier == TIER_SUPREME:
