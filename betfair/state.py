@@ -35,6 +35,7 @@ def _empty() -> dict:
         "paper_daily_bets":    [],
         "cumulative_profit":   0.0,
         "profit_milestone":    0.0,
+        "paper_place_pnl":     0.0,
     }
 
 
@@ -65,6 +66,7 @@ def reset_daily(state: dict) -> dict:
     state["daily_bets"]       = []
     state["paper_daily_pnl"]  = 0.0
     state["paper_daily_bets"] = []
+    state["paper_place_pnl"]  = 0.0
     save(state)
     return state
 
