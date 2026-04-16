@@ -336,13 +336,10 @@ def _send_result(race: dict, result: dict):
 
     # Streak tracker — post a follow-up showing compounding bank state.
     # Pass horse_a/horse_b so result SP (not morning card estimate) is used.
-    try:
-        from notifications.streak_tracker import update as streak_update
-        streak_msg = streak_update(race, outcome, horse_a=horse_a, horse_b=horse_b)
-        if streak_msg:
-            send_results(streak_msg)
-    except Exception as e:
-        logger.error(f"_send_result: streak tracker failed: {e}", exc_info=True)
+    # Streak tracker moved to betfair_main._paper_settle()
+    # Uses real Betfair place prices instead of SP estimation.
+    # Do not call here.
+    pass
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
