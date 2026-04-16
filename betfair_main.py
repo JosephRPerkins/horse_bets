@@ -131,6 +131,34 @@ def _pick2_score(race: dict) -> int:
     top2 = race.get("top2") or {}
     return int(top2.get("score", 0) or 0)
 
+def _find_fallback_pick(race: dict, exclude_names: list, odds: dict, bf_runners: list):
+    """
+    Find the next best runner from all_runners when Pick 2 is a non-runner.
+    Skips any horse in exclude_names or with REMOVED status on Betfair.
+    Returns (name, sp_dec) or (None, None) if no fallback found.
+    """
+    from betfair.api import _norm_horse
+    all_runners = race.get("all_runners", [])
+    exclude_norm = [_norm_horse(n) for n in exclude_names]
+
+    for runner in all_runners:
+        name = runner.get("horse", "")
+        if _norm_horse(name) in exclude_norm:
+            continue
+        # Check Betfair status
+        sel_id = find_selection_id(name, bf_runners)
+        if sel_id:
+            info = odds.get(sel_id, {})
+            if info.get("status") == "REMOVED":
+                continue
+            live_price = info.get("back")
+            if live_price and live_price >= MIN_PICK2_PRICE:
+                return name, live_price, sel_id
+        # No Betfair match but has a card price
+        sp_dec = runner.get("sp_dec")
+        if sp_dec and sp_dec >= MIN_PICK2_PRICE:
+            return name, sp_dec, None
+    return None, None, None
 
 def _next_tier_threshold(profit: float) -> float:
     for min_profit, _, _ in STAKE_TIERS:
@@ -456,8 +484,19 @@ def _live_bet_job(race: dict, state: dict):
         send(f"⏭️ 💰 <b>SKIP - {race_label}</b>\n⭐ Pick 1 {a_name} - REMOVED (non-runner)")
         return
     if b_info.get("status") == "REMOVED":
-        send(f"⏭️ 💰 <b>SKIP - {race_label}</b>\n🔵 Pick 2 {b_name} - REMOVED (non-runner)")
-        return
+        fallback_name, fallback_price, fallback_sel = _find_fallback_pick(
+            race, [a_name, b_name], odds, bf_runners
+        )
+        if fallback_name:
+            send(f"⚠️ 💰 {race_label}\n🔵 Pick 2 {b_name} - NR, substituting {fallback_name} @ {fallback_price:.2f}")
+            b_name    = fallback_name
+            b_live    = fallback_price
+            b_sel_id  = fallback_sel
+            b_info    = odds.get(fallback_sel, {}) if fallback_sel else {}
+            liq_b     = b_info.get("back_size", 0.0)
+        else:
+            send(f"⏭️ 💰 <b>SKIP - {race_label}</b>\n🔵 Pick 2 {b_name} - NR, no viable substitute")
+            return
 
     a_live = a_info.get("back")
     b_live = b_info.get("back")
@@ -609,6 +648,28 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     liq_a  = a_info.get("back_size", 0.0)
     liq_b  = b_info.get("back_size", 0.0)
 
+    if mkt_ok and a_info.get("status") == "REMOVED":
+        send(f"⏭️ 📝 <b>PAPER SKIP - {race_label}</b>\n⭐ Pick 1 {a_name} - REMOVED (non-runner)")
+        return
+      
+    # Check for non-runners and substitute if possible
+    if mkt_ok and b_info.get("status") == "REMOVED":
+        fallback_name, fallback_price, fallback_sel = _find_fallback_pick(
+            race, [a_name, b_name], odds, bf_runners
+        )
+        if fallback_name:
+            if not silent:
+                logger.info(f"Pick 2 {b_name} NR - substituting {fallback_name}")
+            b_name   = fallback_name
+            b_live   = fallback_price
+            b_sel_id = fallback_sel
+            b_info   = odds.get(fallback_sel, {}) if fallback_sel else {}
+            liq_b    = b_info.get("back_size", 0.0)
+        else:
+            if not silent:
+                send(f"⏭️ 📝 <b>PAPER SKIP - {race_label}</b>\n🔵 Pick 2 {b_name} - NR, no viable substitute")
+            return
+  
     stake_a, stake_b = pick_stakes(profit, tsr, a_live, b_live, tier=tier, pick2_score=p2_sc)
     if stake_b == 0:
         if not silent:
