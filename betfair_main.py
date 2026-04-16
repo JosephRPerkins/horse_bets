@@ -16,6 +16,12 @@ Staking: WINNINGS-DRIVEN (not balance-driven)
   At zero profit stakes stay at 2/horse regardless of account balance.
   Milestone notifications fire every 50 of cumulative profit.
 
+Place bets (paper only):
+  A 2 place bet is simulated alongside every win bet using the live
+  Betfair place market price. Settled on conservative place terms
+  (standard + 1 place). Tracked separately in Telegram output so
+  win and place P&L can be assessed independently before going live.
+
 Usage:
     python betfair_main.py
 Background:
@@ -37,7 +43,7 @@ from apscheduler.triggers.cron         import CronTrigger
 
 import config
 from betfair.api         import (
-    get_client, get_balance, find_win_market,
+    get_client, get_balance, find_win_market, find_place_market,
     get_market_odds, find_selection_id, place_back,
     _to_utc, _to_local_naive, COMMISSION,
 )
@@ -56,7 +62,6 @@ from predict             import place_terms
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
-os.makedirs("logs", exist_ok=True)
 os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
     level   = logging.INFO,
@@ -106,14 +111,19 @@ def _race_places(race: dict) -> int:
     return place_terms(n) if n else 1
 
 
+def _race_cons_places(race: dict) -> int:
+    """Conservative place terms = standard + 1, used for place bet settlement."""
+    return min(_race_places(race) + 1, max(
+        (len(race.get("runners", [])) or race.get("field_size", 0) or 1) - 1, 1
+    ))
+
+
 def _pick2_score(race: dict) -> int:
-    """Extract the model score for Pick 2 from the race dict."""
     top2 = race.get("top2") or {}
     return int(top2.get("score", 0) or 0)
 
 
 def _next_tier_threshold(profit: float) -> float:
-    """Return the next profit threshold that would increase the stake tier."""
     for min_profit, _, _ in STAKE_TIERS:
         if profit < min_profit:
             return float(min_profit)
@@ -153,10 +163,14 @@ def _get_finish_pos(result: dict, horse_name: str):
 
 # ── Paper settlement ──────────────────────────────────────────────────────────
 
-def _paper_settle(race: dict, paper_bets: list, state: dict):
+def _paper_settle(race: dict, paper_bets: list, state: dict,
+                  place_bets: list = None):
     """
     Daemon thread - waits until race_off + 15 minutes, polls Racing API
-    for result, calculates P&L, updates cumulative profit, fires milestones.
+    for result, calculates win and place P&L separately, fires milestones.
+
+    paper_bets: win market bets [{horse, price, stake, label}]
+    place_bets: place market bets [{horse, price, stake, cons_places}] or None
     """
     race_label = f"{race.get('off','?')} {race.get('course','?')}"
     race_id    = race.get("race_id", "")
@@ -194,6 +208,7 @@ def _paper_settle(race: dict, paper_bets: list, state: dict):
         send(f"⚠️ <b>PAPER SETTLE</b> - {race_label}\nResult not available after polling.")
         return
 
+    # ── Win bet settlement ────────────────────────────────────────────────────
     total_pnl   = 0.0
     icon        = "✅"
     bet_results = []
@@ -225,7 +240,38 @@ def _paper_settle(race: dict, paper_bets: list, state: dict):
             lines.append(f"❌ {label} {horse} @ {price} - LOST (NR/inc) (-£{stake:.2f})")
         bet_results.append((bet, won))
 
-    # Log to tier tracker
+    # ── Place bet settlement ──────────────────────────────────────────────────
+    # Settled on conservative place terms (standard + 1).
+    # Tracked separately so place P&L can be assessed independently.
+    place_pnl = 0.0
+    if place_bets:
+        lines.append("------------------------------")
+        lines.append("📍 <b>Place bets</b>")
+        for bet in place_bets:
+            horse       = bet["horse"]
+            price       = bet["price"]
+            stake       = bet["stake"]
+            cons_places = bet.get("cons_places", 3)
+            pos         = _get_finish_pos(result, horse)
+
+            if pos is not None and pos <= cons_places:
+                profit = round(stake * (price - 1) * (1 - COMMISSION), 2)
+                place_pnl += profit
+                lines.append(
+                    f"✅ 📍 {horse} @ {price:.2f} - PLACED top {cons_places} (+£{profit:.2f})"
+                )
+            else:
+                place_pnl -= stake
+                pos_s = f"{pos}th" if pos else "NR/inc"
+                lines.append(
+                    f"❌ 📍 {horse} @ {price:.2f} - UNPLACED {pos_s} (-£{stake:.2f})"
+                )
+
+        state["paper_place_pnl"] = round(
+            state.get("paper_place_pnl", 0.0) + place_pnl, 2
+        )
+
+    # ── Tier tracker ─────────────────────────────────────────────────────────
     try:
         from utils.tier_tracker import log_result
         tier     = race.get("tier")
@@ -249,7 +295,7 @@ def _paper_settle(race: dict, paper_bets: list, state: dict):
     except Exception as e:
         logger.error(f"tier_tracker paper log failed for {race_label}: {e}")
 
-    # Update cumulative profit and fire any milestone notifications
+    # ── Update state and notify ───────────────────────────────────────────────
     milestone_alerts = update_cumulative_profit(state, total_pnl)
     for alert in milestone_alerts:
         send(alert)
@@ -266,21 +312,30 @@ def _paper_settle(race: dict, paper_bets: list, state: dict):
     })
     save(state)
 
-    cum_profit  = state.get("cumulative_profit", 0.0)
-    sign        = "+" if total_pnl >= 0 else ""
-    day_sign    = "+" if state["paper_daily_pnl"] >= 0 else ""
-    profit_sign = "+" if cum_profit >= 0 else ""
+    cum_profit       = state.get("cumulative_profit", 0.0)
+    day_place_pnl    = state.get("paper_place_pnl", 0.0)
+    sign             = "+" if total_pnl >= 0 else ""
+    place_sign       = "+" if place_pnl >= 0 else ""
+    day_sign         = "+" if state["paper_daily_pnl"] >= 0 else ""
+    day_place_sign   = "+" if day_place_pnl >= 0 else ""
+    profit_sign      = "+" if cum_profit >= 0 else ""
+
+    lines += ["------------------------------"]
+    lines.append(f"Win P&L:         {sign}£{total_pnl:.2f}")
+    if place_bets:
+        lines.append(f"Place P&L:       {place_sign}£{place_pnl:.2f}")
+    lines.append(f"Day Win P&L:     {day_sign}£{state['paper_daily_pnl']:.2f}")
+    if place_bets:
+        lines.append(f"Day Place P&L:   {day_place_sign}£{day_place_pnl:.2f}")
     lines += [
-        "------------------------------",
-        f"Race P&L:        {sign}£{total_pnl:.2f}",
-        f"Day P&L:         {day_sign}£{state['paper_daily_pnl']:.2f}",
         f"Cumulative P&L:  {profit_sign}£{cum_profit:.2f}",
         f"Next tier at:    £{_next_tier_threshold(cum_profit):.0f} profit",
     ]
+
     send(f"{icon} " + "\n".join(lines)[2:])
     logger.info(
-        f"Paper settled {race_label}: P&L {sign}£{total_pnl:.2f} "
-        f"| cumulative £{cum_profit:.2f}"
+        f"Paper settled {race_label}: win {sign}£{total_pnl:.2f} "
+        f"place {place_sign}£{place_pnl:.2f} | cumulative £{cum_profit:.2f}"
     )
 
 
@@ -458,7 +513,13 @@ def _live_bet_job(race: dict, state: dict):
 
 def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     """
-    Simulate bets using cumulative profit for stake tier, not Betfair balance.
+    Simulate win bets and place bets using cumulative profit for stake tier.
+
+    Win bets: back to win on win market at tier stake.
+    Place bets: back to place on place market at 2 fixed stake.
+                Uses live Betfair place market prices (not calculated 1/4 odds).
+                Settled on conservative place terms (standard + 1).
+                Tracked separately so win and place P&L can be compared.
     """
     off_str    = race.get("off", "?")
     course     = race.get("course", "?")
@@ -526,7 +587,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
             f"(P1 liq: £{liq_a:.0f}, P2 liq: £{liq_b:.0f})"
         )
 
-    def _log(horse, stake, price, liq, label):
+    def _log_win(horse, stake, price, liq, label):
         if stake == 0:
             return
         if price and price > 1:
@@ -539,8 +600,8 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
             lines.append(f"⚠️ {label}: {horse} - no usable price")
 
     a_label = "⭐ Pick 1 (TSR)" if tsr else "⭐ Pick 1"
-    _log(a_name, actual_a, a_live, liq_a, a_label)
-    _log(b_name, actual_b, b_live, liq_b, "🔵 Pick 2")
+    _log_win(a_name, actual_a, a_live, liq_a, a_label)
+    _log_win(b_name, actual_b, b_live, liq_b, "🔵 Pick 2")
 
     if not paper_bets:
         if not silent:
@@ -548,12 +609,62 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
             send("\n".join(lines))
         return
 
+    # ── Place market bets ─────────────────────────────────────────────────────
+    # Fetch live Betfair place market prices for each pick.
+    # Fixed stake of 2 per horse regardless of win stake tier.
+    # Uses conservative place terms (standard + 1 place).
+    # Only runs in non-silent mode (paper foreground, not background during live).
+    place_bets    = []
+    cons_places   = _race_cons_places(race)
+
+    if not silent:
+        try:
+            place_mkt, _ = find_place_market(race)
+            if place_mkt is not None:
+                place_odds_map = get_market_odds(place_mkt.market_id)
+                place_runners  = place_mkt.runners or []
+
+                # Only back horses that are in our win bets
+                for win_bet in paper_bets:
+                    horse  = win_bet["horse"]
+                    sel_id = find_selection_id(horse, place_runners)
+                    if sel_id is None:
+                        continue
+                    p_info  = place_odds_map.get(sel_id, {})
+                    p_price = p_info.get("back")
+                    p_liq   = p_info.get("back_size", 0.0)
+                    if not p_price or p_price < 1.1:
+                        continue
+                    place_bets.append({
+                        "horse":       horse,
+                        "price":       p_price,
+                        "stake":       2.0,
+                        "cons_places": cons_places,
+                    })
+
+                if place_bets:
+                    lines.append("------------------------------")
+                    lines.append(f"📍 <b>Place bets (£2 each, top {cons_places})</b>")
+                    for pb in place_bets:
+                        lines.append(
+                            f"  📍 {pb['horse']} @ {pb['price']:.2f}"
+                            + (f" (liq: £{p_liq:.0f})" if p_liq else "")
+                        )
+                else:
+                    lines.append("📍 Place market found but no prices available")
+            else:
+                lines.append("📍 No place market found for this race")
+        except Exception as e:
+            logger.warning(f"Place market lookup failed for {race_label}: {e}")
+            lines.append("📍 Place market lookup failed")
+
     if not silent:
         send("\n".join(lines))
 
     t = threading.Thread(
         target = _paper_settle,
         args   = (race, paper_bets, state),
+        kwargs = {"place_bets": place_bets if not silent else None},
         daemon = True,
         name   = f"PaperSettle_{race.get('race_id', '')}",
     )
@@ -588,17 +699,18 @@ def bet_job(race: dict, state: dict):
 
 def end_of_day_job(state: dict):
     logger.info("end_of_day_job")
-    bal        = get_balance()
-    profit     = state.get("cumulative_profit", 0.0)
-    today      = date.today().strftime("%A %-d %B %Y")
-    mode       = state.get("mode", "paper").upper()
+    bal           = get_balance()
+    profit        = state.get("cumulative_profit", 0.0)
+    today         = date.today().strftime("%A %-d %B %Y")
+    mode          = state.get("mode", "paper").upper()
 
-    live_bets  = state.get("daily_bets", [])
-    live_pnl   = state.get("daily_pnl", 0.0)
-    paper_bets = state.get("paper_daily_bets", [])
-    paper_pnl  = state.get("paper_daily_pnl", 0.0)
-    live_wins  = sum(1 for b in live_bets  if b.get("total_pnl", 0) > 0)
-    paper_wins = sum(1 for b in paper_bets if b.get("total_pnl", 0) > 0)
+    live_bets     = state.get("daily_bets", [])
+    live_pnl      = state.get("daily_pnl", 0.0)
+    paper_bets    = state.get("paper_daily_bets", [])
+    paper_pnl     = state.get("paper_daily_pnl", 0.0)
+    paper_place   = state.get("paper_place_pnl", 0.0)
+    live_wins     = sum(1 for b in live_bets  if b.get("total_pnl", 0) > 0)
+    paper_wins    = sum(1 for b in paper_bets if b.get("total_pnl", 0) > 0)
 
     profit_sign = "+" if profit >= 0 else ""
     lines = [
@@ -612,16 +724,21 @@ def end_of_day_job(state: dict):
     ]
 
     if paper_bets:
-        sign = "+" if paper_pnl >= 0 else ""
+        sign       = "+" if paper_pnl >= 0 else ""
+        place_sign = "+" if paper_place >= 0 else ""
+        combined   = round(paper_pnl + paper_place, 2)
+        comb_sign  = "+" if combined >= 0 else ""
         lines += [
             "-- 📝 Paper ------------------",
             f"Races: {len(paper_bets)} | Wins: {paper_wins} | Losses: {len(paper_bets)-paper_wins}",
-            f"P&L: {sign}£{paper_pnl:.2f}",
+            f"Win P&L:   {sign}£{paper_pnl:.2f}",
+            f"Place P&L: {place_sign}£{paper_place:.2f}",
+            f"Combined:  {comb_sign}£{combined:.2f}",
         ]
         for b in paper_bets:
             icon = "✅" if b.get("total_pnl", 0) > 0 else "❌"
-            sign = "+" if b.get("total_pnl", 0) >= 0 else ""
-            lines.append(f"  {icon} {b['race']} - {sign}£{b['total_pnl']:.2f}")
+            b_sign = "+" if b.get("total_pnl", 0) >= 0 else ""
+            lines.append(f"  {icon} {b['race']} - {b_sign}£{b['total_pnl']:.2f}")
 
     if live_bets:
         sign = "+" if live_pnl >= 0 else ""
@@ -631,9 +748,9 @@ def end_of_day_job(state: dict):
             f"P&L: {sign}£{live_pnl:.2f}",
         ]
         for b in live_bets:
-            icon = "✅" if b.get("total_pnl", 0) > 0 else "❌"
-            sign = "+" if b.get("total_pnl", 0) >= 0 else ""
-            lines.append(f"  {icon} {b['race']} - {sign}£{b['total_pnl']:.2f}")
+            icon   = "✅" if b.get("total_pnl", 0) > 0 else "❌"
+            b_sign = "+" if b.get("total_pnl", 0) >= 0 else ""
+            lines.append(f"  {icon} {b['race']} - {b_sign}£{b['total_pnl']:.2f}")
 
     try:
         from utils.tier_tracker import get_eod_summary
