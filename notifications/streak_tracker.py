@@ -8,9 +8,17 @@ Tracks two theoretical compounding bets across the day:
 Both start at £10. Winnings compound into the next stake. On a loss, reset to £10.
 State persists to disk so bot restarts don't wipe the day's progress.
 
-Odds calculation uses a logit-shift model to derive top-N finish odds from win SP:
-  A table encodes how much easier it is to finish top-N vs win outright.
-  Calibrated empirically; A[N] increases with N (larger target = shorter odds).
+Odds calculation — two modes:
+
+  update_from_betfair() [preferred]:
+    Uses actual live Betfair place market prices captured at bet time.
+    These are real exchange odds, not estimated from win SP.
+    Combined odds = place_price_a * place_price_b (treated as independent legs).
+
+  update() [fallback / legacy]:
+    Derives place odds from win SP using a logit-shift model.
+    Used as fallback if Betfair place prices are unavailable.
+    A[N] encodes how much easier it is to finish top-N vs win outright.
 """
 
 import json
@@ -25,12 +33,9 @@ INITIAL_STAKE = 10.0
 STATE_DIR     = "data/streaks"
 STATE_PATH    = os.path.join(STATE_DIR, "today.json")
 
-# Logit-shift constants (from user's calibration).
-# A[N] = how much more likely a horse is to finish top-N vs win.
-# Table valid for N=2..7; for larger N we use A[7].
+# Logit-shift constants — fallback only, used when Betfair place prices unavailable
 A = {2: 0.9, 3: 1.3, 4: 1.6, 5: 2.0, 6: 2.3, 7: 2.8}
 
-# Module-level state — loaded on import, updated after each result
 _state: dict = {}
 
 
@@ -70,7 +75,6 @@ def save_state() -> None:
 
 
 def reset_streaks() -> None:
-    """Called at midnight to start a fresh day."""
     global _state
     _state = _fresh_state()
     save_state()
@@ -81,10 +85,8 @@ def reset_streaks() -> None:
 
 def top_n_dec_from_sp_dec(sp_dec: float, N: int) -> float:
     """
-    Return decimal odds for a horse finishing in the top-N positions,
-    derived from its win SP (decimal).
-
-    Returns 1.01 as a floor (near-certainty) if maths would go weird.
+    Fallback: derive place odds from win SP using logit-shift model.
+    Used only when Betfair place market prices are unavailable.
     """
     if sp_dec <= 1.0:
         return 1.01
@@ -100,24 +102,84 @@ def top_n_dec_from_sp_dec(sp_dec: float, N: int) -> float:
 
 
 def combined_top_n_dec(sp_a: float, sp_b: float, N: int) -> float:
-    """
-    Combined Bet Builder decimal odds — both picks finish top-N.
-    Treated as independent (standard Bet Builder pricing assumption).
-    """
+    """Fallback: combined odds from win SP."""
     return top_n_dec_from_sp_dec(sp_a, N) * top_n_dec_from_sp_dec(sp_b, N)
 
 
-# ── Per-result update ─────────────────────────────────────────────────────────
+def combined_from_place_prices(place_price_a: float, place_price_b: float) -> float:
+    """
+    Combined Bet Builder odds using actual Betfair place market prices.
+    Both legs treated as independent — standard Bet Builder assumption.
+    place_price_a and place_price_b are decimal odds from the place market.
+    """
+    return round(place_price_a * place_price_b, 2)
+
+
+# ── Main update functions ─────────────────────────────────────────────────────
+
+def update_from_betfair(
+    race:          dict,
+    outcome:       dict,
+    horse_a_name:  str,
+    horse_b_name:  str,
+    place_price_a: float,
+    place_price_b: float,
+    std_places:    int,
+    cons_places:   int,
+) -> str | None:
+    """
+    Update streak tracker using actual Betfair place market prices.
+
+    Called from betfair_main._paper_settle() after each race settles.
+    Uses real exchange place prices captured at bet time — no SP estimation.
+
+    place_price_a: Betfair place market back price for Pick 1 at bet time
+    place_price_b: Betfair place market back price for Pick 2 at bet time
+    std_places:    standard place terms for this race
+    cons_places:   conservative place terms (standard + 1)
+    outcome:       {std_win: bool, cons_win: bool}
+    """
+    if not _state:
+        load_state()
+
+    if not place_price_a or not place_price_b or place_price_a < 1.01 or place_price_b < 1.01:
+        logger.warning(
+            f"streak_tracker: skipping {race.get('off','?')} {race.get('course','?')} "
+            f"— invalid place prices a={place_price_a} b={place_price_b}"
+        )
+        return None
+
+    std_won  = outcome.get("std_win", False)
+    cons_won = outcome.get("cons_win", False)
+
+    # Combined odds = place_price_a * place_price_b (independent legs)
+    # Same odds used for both std and cons since prices are from the place market
+    # which already reflects the race's actual place terms
+    std_odds  = combined_from_place_prices(place_price_a, place_price_b)
+    cons_odds = std_odds  # place market prices already account for place terms
+
+    return _run_update(
+        race         = race,
+        horse_a_name = horse_a_name,
+        horse_b_name = horse_b_name,
+        std_won      = std_won,
+        cons_won     = cons_won,
+        std_odds     = std_odds,
+        cons_odds    = cons_odds,
+        std_N        = std_places,
+        cons_N       = cons_places,
+        price_source = "Betfair",
+        price_a      = place_price_a,
+        price_b      = place_price_b,
+    )
+
 
 def update(race: dict, outcome: dict,
            horse_a: dict | None = None,
            horse_b: dict | None = None) -> str | None:
     """
-    Called after each result. Updates both trackers and returns a formatted
-    Telegram message string, or None if there's not enough data to track.
-
-    horse_a / horse_b: result-enriched pick dicts (with actual SP from result).
-    Falls back to race["top1"] / race["top2"] if not provided.
+    Legacy fallback: update using win SP with logit-shift odds estimation.
+    Used when Betfair place prices are not available.
     """
     if not _state:
         load_state()
@@ -134,19 +196,49 @@ def update(race: dict, outcome: dict,
         )
         return None
 
-    std_N  = race.get("places", 3)
-    cons_N = race.get("cons_places", 4)
+    std_N    = race.get("places", 3)
+    cons_N   = race.get("cons_places", 4)
     std_won  = outcome.get("std_win", False)
     cons_won = outcome.get("cons_win", False)
-
     std_odds  = combined_top_n_dec(sp_a, sp_b, std_N)
     cons_odds = combined_top_n_dec(sp_a, sp_b, cons_N)
 
+    return _run_update(
+        race         = race,
+        horse_a_name = top1.get("horse", "?"),
+        horse_b_name = top2.get("horse", "?"),
+        std_won      = std_won,
+        cons_won     = cons_won,
+        std_odds     = std_odds,
+        cons_odds    = cons_odds,
+        std_N        = std_N,
+        cons_N       = cons_N,
+        price_source = "SP estimate",
+        price_a      = sp_a,
+        price_b      = sp_b,
+    )
+
+
+def _run_update(
+    race:         dict,
+    horse_a_name: str,
+    horse_b_name: str,
+    std_won:      bool,
+    cons_won:     bool,
+    std_odds:     float,
+    cons_odds:    float,
+    std_N:        int,
+    cons_N:       int,
+    price_source: str,
+    price_a:      float,
+    price_b:      float,
+) -> str:
+    """Internal: apply results to both trackers and build Telegram message."""
     std_tracker  = _state["std"]
     cons_tracker = _state["cons"]
 
-    std_prev_bal  = std_tracker["balance"]
-    cons_prev_bal = cons_tracker["balance"]
+    std_prev_bal     = std_tracker["balance"]
+    cons_prev_bal    = cons_tracker["balance"]
     std_prev_streak  = std_tracker["streak"]
     cons_prev_streak = cons_tracker["streak"]
 
@@ -155,15 +247,12 @@ def update(race: dict, outcome: dict,
 
     save_state()
 
-    # Build message
-    a_name = top1.get("horse", "?")
-    b_name = top2.get("horse", "?")
     race_label = f"{race.get('off','?')} {race.get('course','?')}"
-
     lines = [
         "📈 <b>STREAK TRACKER</b>",
-        f"<i>{race_label} — {a_name} + {b_name}</i>",
-        "──────────────────────────────",
+        f"<i>{race_label} — {horse_a_name} + {horse_b_name}</i>",
+        f"<i>Prices: {price_a:.2f} x {price_b:.2f} ({price_source})</i>",
+        "------------------------------",
     ]
 
     lines += _format_tracker_block(
@@ -173,10 +262,6 @@ def update(race: dict, outcome: dict,
         prev_streak = std_prev_streak,
         won         = std_won,
         odds        = std_odds,
-        stake       = std_prev_bal,
-        sp_a        = sp_a,
-        sp_b        = sp_b,
-        N           = std_N,
     )
 
     lines.append("")
@@ -188,13 +273,9 @@ def update(race: dict, outcome: dict,
         prev_streak = cons_prev_streak,
         won         = cons_won,
         odds        = cons_odds,
-        stake       = cons_prev_bal,
-        sp_a        = sp_a,
-        sp_b        = sp_b,
-        N           = cons_N,
     )
 
-    lines.append("──────────────────────────────")
+    lines.append("------------------------------")
     return "\n".join(lines)
 
 
@@ -202,56 +283,47 @@ def _apply_result(tracker: dict, won: bool, odds: float) -> None:
     stake = tracker["balance"]
     if won:
         profit = stake * (odds - 1.0)
-        tracker["balance"] = round(tracker["balance"] + profit, 2)
-        tracker["streak"]  += 1
+        tracker["balance"]     = round(tracker["balance"] + profit, 2)
+        tracker["streak"]      += 1
         tracker["best_streak"] = max(tracker["best_streak"], tracker["streak"])
-        tracker["peak"]    = max(tracker["peak"], tracker["balance"])
+        tracker["peak"]        = max(tracker["peak"], tracker["balance"])
     else:
         tracker["balance"] = INITIAL_STAKE
         tracker["streak"]  = 0
 
 
 def _format_tracker_block(
-    label: str,
-    tracker: dict,
-    prev_bal: float,
+    label:       str,
+    tracker:     dict,
+    prev_bal:    float,
     prev_streak: int,
-    won: bool,
-    odds: float,
-    stake: float,
-    sp_a: float,
-    sp_b: float,
-    N: int,
-) -> list[str]:
-    dec_a = top_n_dec_from_sp_dec(sp_a, N)
-    dec_b = top_n_dec_from_sp_dec(sp_b, N)
-
+    won:         bool,
+    odds:        float,
+) -> list:
     lines = [label]
     if won:
-        profit = round(stake * (odds - 1.0), 2)
+        profit  = round(prev_bal * (odds - 1.0), 2)
         new_bal = tracker["balance"]
         lines.append(
             f"  ✅ Win streak: {tracker['streak']}  |  "
             f"£{prev_bal:.2f} → £{new_bal:.2f} (+£{profit:.2f})"
         )
-        lines.append(
-            f"  Odds: {dec_a:.2f} × {dec_b:.2f}  |  Combined: {odds:.2f}"
-        )
+        lines.append(f"  Combined odds: {odds:.2f}")
     else:
         lines.append(
             f"  ❌ Reset (streak was {prev_streak})  |  "
             f"£{prev_bal:.2f} → £{INITIAL_STAKE:.2f}"
         )
-        lines.append(f"  Odds would have been: {odds:.2f}")
-
-    lines.append(f"  Best today: {tracker['best_streak']} wins  |  Peak: £{tracker['peak']:.2f}")
+        lines.append(f"  Would have been: {odds:.2f}")
+    lines.append(
+        f"  Best today: {tracker['best_streak']} wins  |  Peak: £{tracker['peak']:.2f}"
+    )
     return lines
 
 
-# ── End-of-day section ────────────────────────────────────────────────────────
+# ── End-of-day summary ────────────────────────────────────────────────────────
 
 def get_eod_summary() -> str:
-    """Returns a streak summary block to embed in the end-of-day message."""
     if not _state:
         load_state()
 
@@ -259,7 +331,7 @@ def get_eod_summary() -> str:
     cons = _state.get("cons", {})
 
     lines = [
-        "──────────────────────────────",
+        "------------------------------",
         "📈 <b>Streak Tracker</b>",
         f"📊 Standard      — best: {std.get('best_streak', 0)} wins  |  peak: £{std.get('peak', INITIAL_STAKE):.2f}  |  closing: £{std.get('balance', INITIAL_STAKE):.2f}",
         f"🛡️ Conservative  — best: {cons.get('best_streak', 0)} wins  |  peak: £{cons.get('peak', INITIAL_STAKE):.2f}  |  closing: £{cons.get('balance', INITIAL_STAKE):.2f}",
@@ -267,5 +339,5 @@ def get_eod_summary() -> str:
     return "\n".join(lines)
 
 
-# Load on import so state is available immediately
+# Load on import
 load_state()
