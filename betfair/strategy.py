@@ -6,7 +6,7 @@ v3 bet qualification and stake calculation.
 Winnings-driven staking:
   Stakes are determined by cumulative NET PROFIT, not total Betfair balance.
   Initial deposit never compounds — only actual winnings scale stakes up.
-  At zero or negative profit stakes stay at 2/horse.
+  At zero or negative profit stakes stay at £2/horse.
 
 Odds-on handling by tier:
   SUPREME  — back Pick 1 at any price regardless of Pick 2 price
@@ -183,11 +183,8 @@ def pick_stakes(profit: float, tsr: bool,
     - SUPREME: always backs Pick 1. Pick 2 backed only if >= MIN_PICK2_PRICE.
     - STRONG odds-on P1: skip entirely (0, 0)
     - GOOD/SKIP: capped at £2/horse
-    - Non-SUPREME with Pick 2 below minimum but Pick 1 qualifying:
-      backs Pick 1 solo (s1, 0) rather than skipping entirely.
-
-    Returns (0.0, 0.0) only when race should be skipped completely.
-    Returns (s1, 0.0) when Pick 1 should be backed solo.
+    - Non-SUPREME with P1 qualifying but P2 below min: backs P1 solo (s1, 0)
+    - Returns (0, 0) only when race should be skipped completely.
     """
     if tier in TIER1_CAP_TIERS:
         base     = 2.0
@@ -201,7 +198,7 @@ def pick_stakes(profit: float, tsr: bool,
     p2_ok        = pick2_price is not None and pick2_price >= MIN_PICK2_PRICE
 
     # ── SUPREME ───────────────────────────────────────────────────────────────
-    # Always back Pick 1. Back Pick 2 only if price is viable.
+    # Always back Pick 1 at any price. Pick 2 only if price viable.
     if tier == TIER_SUPREME:
         s1 = get_tsr_stake(profit) if tier not in TIER1_CAP_TIERS else base
         s2 = base if p2_ok else 0.0
@@ -212,6 +209,8 @@ def pick_stakes(profit: float, tsr: bool,
         return 0.0, 0.0
 
     # ── Normal P1 qualifies ───────────────────────────────────────────────────
+    # Back P1. Back P2 only if it meets minimum price.
+    # If P2 below minimum, back P1 solo rather than skipping race.
     if p1_qualifies:
         s2 = base if p2_ok else 0.0
         return base, s2
@@ -247,22 +246,22 @@ def apply_liquidity(stake_a: float, stake_b: float,
             return 0.0, 0.0, True, f"Pick 2 liquidity £{liq_b:.2f} < £{MIN_LIQUIDITY:.0f}"
         return 0.0, actual_b, False, ""
     else:
-        # Solo Pick 1 bet (stake_b == 0) — only check Pick 1 liquidity
+        # Solo Pick 1 bet (stake_b == 0) — only check P1 liquidity
         if stake_b == 0:
             actual_a = min(stake_a, liq_a) if liq_a > 0 else stake_a
             if actual_a < MIN_LIQUIDITY and liq_a > 0:
                 return 0.0, 0.0, True, f"Pick 1 liquidity £{liq_a:.2f} < £{MIN_LIQUIDITY:.0f}"
             return actual_a, 0.0, False, ""
         # Both picks
-        safe   = min(liq_a, liq_b) if liq_a > 0 and liq_b > 0 else stake_a
-        actual = min(stake_a, safe)
-        if actual < MIN_LIQUIDITY and (liq_a > 0 or liq_b > 0):
+        safe     = min(liq_a, liq_b) if liq_a > 0 and liq_b > 0 else stake_a
+        actual_a = min(stake_a, safe)
+        actual_b = min(stake_b, liq_b) if liq_b > 0 else stake_b
+        if actual_a < MIN_LIQUIDITY and (liq_a > 0 or liq_b > 0):
             return 0.0, 0.0, True, (
                 f"Liquidity too low — P1: £{liq_a:.2f} P2: £{liq_b:.2f} "
                 f"(need >= £{MIN_LIQUIDITY:.0f})"
             )
-        actual_b = min(stake_b, liq_b) if liq_b > 0 else stake_b
-        return actual, actual_b, False, ""
+        return actual_a, actual_b, False, ""
 
 
 def check_topup_alerts(balance: float, profit: float,
