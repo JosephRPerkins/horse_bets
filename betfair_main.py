@@ -452,8 +452,13 @@ def _live_bet_job(race: dict, state: dict):
     balance    = get_balance()
     profit     = state.get("cumulative_profit", 0.0)
     p2_sc      = _pick2_score(race)
-    
-  # Get Pick 3 price for two-horse race detection
+  
+    top1   = race.get("top1") or {}
+    top2   = race.get("top2") or {}
+    a_name = top1.get("horse", "?")
+    b_name = top2.get("horse", "?")
+
+    # Get Pick 3 price for two-horse race detection
     all_runners = race.get("all_runners", [])
     pick3_price = None
     for r in all_runners:
@@ -462,12 +467,7 @@ def _live_bet_job(race: dict, state: dict):
         if _norm_horse(name) not in [_norm_horse(a_name), _norm_horse(b_name)]:
             pick3_price = r.get("sp_dec")
             break
-  
-    top1   = race.get("top1") or {}
-    top2   = race.get("top2") or {}
-    a_name = top1.get("horse", "?")
-    b_name = top2.get("horse", "?")
-
+          
     prev_stake = state.get("_prev_tier_stake")
     for alert in check_topup_alerts(balance, profit, prev_stake):
         send(alert)
@@ -510,7 +510,10 @@ def _live_bet_job(race: dict, state: dict):
     stake_a, stake_b = pick_stakes(profit, tsr, a_live, b_live, tier=tier,
                                    pick2_score=p2_sc, pick3_price=pick3_price)
     place_only = (stake_a == -1.0 and stake_b == -1.0)
-    if not place_only and stake_a == 0 and stake_b == 0:
+    if place_only:
+        send(f"🐴 💰 {race_label} — two-horse race, place market only (paper tracking)")
+        return
+    if stake_a == 0 and stake_b == 0:
         reason = (f"Pick 2 @ {b_live} below min {MIN_PICK2_PRICE}"
                   if b_live else "No viable picks")
         send(f"⏭️ 💰 <b>SKIP - {race_label}</b>\n{reason}")
@@ -622,6 +625,11 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     profit     = state.get("cumulative_profit", 0.0)
     p2_sc      = _pick2_score(race)
 
+    top1   = race.get("top1") or {}
+    top2   = race.get("top2") or {}
+    a_name = top1.get("horse", "?")
+    b_name = top2.get("horse", "?")
+
     # Get Pick 3 price for two-horse race detection
     all_runners = race.get("all_runners", [])
     pick3_price = None
@@ -631,12 +639,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
         if _norm_horse(name) not in [_norm_horse(a_name), _norm_horse(b_name)]:
             pick3_price = r.get("sp_dec")
             break
-  
-    top1   = race.get("top1") or {}
-    top2   = race.get("top2") or {}
-    a_name = top1.get("horse", "?")
-    b_name = top2.get("horse", "?")
-
+          
     mkt, odds, bf_runners = _get_market(race)
     mkt_ok   = mkt is not None
     a_sel_id = find_selection_id(a_name, bf_runners) if mkt_ok else None
@@ -685,12 +688,16 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
             send(f"⏭️ 📝 <b>PAPER SKIP - {race_label}</b>\n{reason}")
         return
 
-    redirect = stake_a == 0
+    redirect = stake_a == 0 if not place_only else False
 
     actual_a, actual_b, _, _ = apply_liquidity(
-        stake_a, stake_b, liq_a, liq_b, redirect
+        stake_a if not place_only else 0.0,
+        stake_b if not place_only else 0.0,
+        liq_a, liq_b, redirect
     )
-    if not mkt_ok:
+    if place_only:
+        actual_a, actual_b = 0.0, 0.0
+    elif not mkt_ok:
         actual_a, actual_b = stake_a, stake_b
 
     # ── Build bet notification ────────────────────────────────────────────────
@@ -729,15 +736,15 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
             paper_bets.append({"horse": horse, "price": price, "stake": stake, "label": label})
         else:
             lines.append(f"⚠️ {label}: {horse} - no usable price")
-          
-    if place_only and not paper_bets:
-        # Two-horse race — skip win bets, go straight to place market
-        lines.append("🐴 <b>Two-horse race — place bets only</b>")
       
     a_label = "⭐ Pick 1 (TSR)" if tsr else "⭐ Pick 1"
     _log_win(a_name, actual_a, a_live, liq_a, a_label)
     _log_win(b_name, actual_b, b_live, liq_b, "🔵 Pick 2")
 
+    if place_only and not paper_bets:
+        # Two-horse race — skip win bets, go straight to place market
+        lines.append("🐴 <b>Two-horse race — place bets only</b>")
+      
     if not paper_bets and not place_only:
         if not silent:
             lines.append("\nℹ️ No paper bets logged")
@@ -757,8 +764,8 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                 place_odds_map = get_market_odds(place_mkt.market_id)
                 place_runners  = place_mkt.runners or []
 
-                for win_bet in paper_bets:
-                    horse  = win_bet["horse"]
+                horses_to_place = [w["horse"] for w in paper_bets] if paper_bets else ([a_name, b_name] if place_only else [])
+                for horse in horses_to_place:
                     sel_id = find_selection_id(horse, place_runners)
                     if sel_id is None:
                         continue
