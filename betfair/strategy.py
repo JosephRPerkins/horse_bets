@@ -165,21 +165,28 @@ def should_back_pick2(pick2_price, tier: int = TIER_STD) -> bool:
 
 def is_two_horse_race(pick1_price, pick2_price, pick3_price) -> bool:
     """
-    Returns True when the market identifies this as effectively a two-horse race.
-    Conditions:
-      - Pick 1 is odds-on (< 2.0)
-      - Pick 2 is short but not odds-on (< MIN_PICK2_PRICE)
-      - Pick 3 is at least 3x the price of Pick 2
-    This catches races where both top picks are short but the rest of
-    the field is a long way back — high confidence place opportunity.
+    True when market identifies an effective two-horse race.
+    Two scenarios:
+    1. Both picks short (P1 odds-on, P2 < MIN_PICK2_PRICE) and field drops away
+    2. P1 very heavily odds-on (< 1.5) and P3 is at least 3x P2 price
+       — catches cases where P2 is viable but P1 is so short the race
+       is effectively between just two horses
     """
     if not pick1_price or not pick2_price or not pick3_price:
         return False
-    return (
-        pick1_price < MIN_PICK1_PRICE          # P1 odds-on
-        and pick2_price < MIN_PICK2_PRICE      # P2 short
-        and pick3_price >= pick2_price * 3.0   # P3 well behind
+    # Scenario 1: both picks short, field drops away
+    scenario1 = (
+        pick1_price < MIN_PICK1_PRICE
+        and pick2_price < MIN_PICK2_PRICE
+        and pick3_price >= pick2_price * 3.0
     )
+    # Scenario 2: P1 very heavily odds-on, P2 viable, P3 well behind
+    scenario2 = (
+        pick1_price < 1.5
+        and pick2_price >= MIN_PICK2_PRICE
+        and pick3_price >= pick2_price * 2.0
+    )
+    return scenario1 or scenario2
 
 def pick_stakes(profit: float, tsr: bool,
                 pick1_price, pick2_price,
