@@ -387,6 +387,12 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     for alert in milestone_alerts:
         send(alert)
 
+    # ── Circuit breaker check ─────────────────────────────────────────────────
+    from betfair.state import check_circuit_breaker
+    circuit_alert = check_circuit_breaker(state)
+    if circuit_alert:
+        send(circuit_alert)
+                    
     if total_pnl + place_pnl < 0:
         icon = "❌"
     elif total_pnl + place_pnl == 0:
