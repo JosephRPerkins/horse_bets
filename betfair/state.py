@@ -36,6 +36,7 @@ def _empty() -> dict:
         "cumulative_profit":   0.0,
         "profit_milestone":    0.0,
         "paper_place_pnl":     0.0,
+        "banked_profit":       0.0,
     }
 
 
@@ -67,6 +68,24 @@ def reset_daily(state: dict) -> dict:
     state["paper_daily_pnl"]  = 0.0
     state["paper_daily_bets"] = []
     state["paper_place_pnl"]  = 0.0
+    
+    # ── Daily banking ─────────────────────────────────────────────────────────
+    # Bank profit to nearest £50 floor, carry forward remainder.
+    # If remainder is within £10 of the next £50 tier, scale back
+    # to avoid immediately stepping up stakes on fragile profit.
+    profit = state.get("cumulative_profit", 0.0)
+    if profit > 0:
+        banked  = (profit // 50) * 50
+        carry   = round(profit - banked, 2)
+        # Safety buffer: if carry is within £10 of next £50, bank one more tier
+        if carry >= 40:
+            banked += 50
+            carry   = round(profit - banked, 2)
+            if carry < 0:
+                carry = 0.0
+        state["banked_profit"]     = round(state.get("banked_profit", 0.0) + banked, 2)
+        state["cumulative_profit"] = carry
+        logger.info(f"Daily banking: banked £{banked:.0f}, carrying forward £{carry:.2f}")
     save(state)
     return state
 
