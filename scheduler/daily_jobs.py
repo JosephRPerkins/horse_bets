@@ -80,6 +80,12 @@ def midnight_job():
         with open(path, "w") as f:
             json.dump({"date": tomorrow_str, "racecards": racecards}, f)
         logger.info(f"midnight_job: saved {len(racecards)} races to {path}")
+
+        # Also save as today.json so betfair bot can read it immediately
+        today_path = os.path.join(config.DIR_CARDS, "today.json")
+        with open(today_path, "w") as f:
+            json.dump({"date": tomorrow_str, "racecards": racecards}, f)
+        logger.info(f"midnight_job: also saved to today.json")
     except Exception as e:
         logger.error(f"midnight_job failed: {e}")
 
