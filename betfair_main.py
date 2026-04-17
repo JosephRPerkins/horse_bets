@@ -596,6 +596,62 @@ def _live_bet_job(race: dict, state: dict):
             "potential_win_credit": win_credit,
         })
 
+    # ── Live place bets ───────────────────────────────────────────────────────
+    live_place_bets = []
+    p_stake         = get_place_stake(profit, tier)
+    cons_places     = _race_cons_places(race)
+
+    try:
+        place_mkt, _ = find_place_market(race)
+        if place_mkt is not None:
+            place_odds_map = get_market_odds(place_mkt.market_id)
+            place_runners  = place_mkt.runners or []
+            place_lines    = ["------------------------------", "📍 <b>Place bets</b>"]
+
+            horses_to_place = [b.get("horse_name", "?") for b in bets_placed]
+            for horse in horses_to_place:
+                sel_id = find_selection_id(horse, place_runners)
+                if sel_id is None:
+                    place_lines.append(f"⚠️ 📍 {horse} — not found in place market")
+                    continue
+                p_info  = place_odds_map.get(sel_id, {})
+                p_price = p_info.get("back")
+                p_liq   = p_info.get("back_size", 0.0)
+
+                if not p_price or p_price < 1.1:
+                    place_lines.append(f"⚠️ 📍 {horse} — no viable place price")
+                    continue
+                if p_liq < MIN_LIQUIDITY:
+                    place_lines.append(
+                        f"⏭️ 📍 {horse} @ {p_price:.2f} — place liquidity too low (£{p_liq:.0f})"
+                    )
+                    continue
+
+                place_bet = place_back(place_mkt.market_id, sel_id, p_price, p_stake)
+                if place_bet:
+                    place_bet["horse_name"] = horse
+                    matched_p = place_bet.get("size_matched", p_stake)
+                    tag = "⏳" if place_bet.get("pending") else "✅"
+                    place_lines.append(
+                        f"{tag} 📍 {horse} @ {p_price:.2f} £{matched_p:.2f} (liq: £{p_liq:.0f})"
+                    )
+                    live_place_bets.append({
+                        "horse":       horse,
+                        "price":       p_price,
+                        "stake":       matched_p or p_stake,
+                        "cons_places": cons_places,
+                    })
+                else:
+                    place_lines.append(f"❌ 📍 {horse} @ {p_price:.2f} — rejected by Betfair")
+
+            if len(place_lines) > 2:
+                send("\n".join(place_lines))
+        else:
+            send(f"📍 No place market found for {race_label}")
+    except Exception as e:
+        logger.error(f"Live place bet failed for {race_label}: {e}")
+        send(f"⚠️ 📍 Place bet error for {race_label}: {e}")
+
     t = threading.Thread(
         target = settle_race,
         args   = (
@@ -603,12 +659,16 @@ def _live_bet_job(race: dict, state: dict):
             str(race.get("off_dt", "")), balance_before, balance_after,
             settle_bets, state,
         ),
-        kwargs = {"race": race, "places": _race_places(race)},
+        kwargs = {
+            "race":        race,
+            "places":      _race_places(race),
+            "place_bets":  live_place_bets if live_place_bets else None,
+            "cons_places": cons_places,
+        },
         daemon = True,
         name   = f"Settle_{race.get('race_id', '')}",
     )
     t.start()
-
 
 # ── Paper bet job ─────────────────────────────────────────────────────────────
 
