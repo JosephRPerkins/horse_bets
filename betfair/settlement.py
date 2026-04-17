@@ -239,6 +239,12 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
         send(alert)
     save(state)
 
+    # ── Circuit breaker check ─────────────────────────────────────────────────
+    from betfair.state import check_circuit_breaker
+    circuit_alert = check_circuit_breaker(state)
+    if circuit_alert:
+        send(circuit_alert)
+                  
     cum_profit = state.get("cumulative_profit", 0.0)
 
     # ── Streak tracker ────────────────────────────────────────────────────────
