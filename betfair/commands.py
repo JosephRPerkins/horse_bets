@@ -3,15 +3,19 @@ betfair/commands.py
 Telegram command listener for the Betfair bot.
 
 Commands:
-  /paper   — switch to paper trading (simulated bets, no real money)
-  /live    — switch to live trading (real bets on Betfair Exchange)
-  /mute    — silence all Betfair bot Telegram notifications
-  /unmute  — resume notifications
-  /stop    — pause betting (both modes)
-  /start   — resume betting
-  /status  — balance, mode, today's P&L (live + paper)
-  /races   — today's qualifying races
-  /help    — command list
+  /paper        — switch to paper trading (simulated bets, no real money)
+  /live         — switch to live trading (real bets on Betfair Exchange)
+  /mute         — silence all Betfair bot Telegram notifications
+  /unmute       — resume notifications
+  /stop         — pause betting (both modes)
+  /start        — resume betting
+  /resetprofit  — reset all paper P&L before going live
+  /streakstart  — enable live streak place betting
+  /streakstop   — disable streak betting
+  /streakstatus — streak stake, P&L, win streak
+  /status       — balance, mode, today's P&L (live + paper)
+  /races        — today's qualifying races
+  /help         — command list
 """
 
 import logging
@@ -51,6 +55,12 @@ HELP_TEXT = """\
 /stop         — pause betting (both modes)
 /start        — resume betting
 /resetprofit  — reset all paper P&L before going live
+
+<b>Streak betting</b>
+/streakstart  — enable streak place betting
+/streakstop   — disable streak betting
+/streakstatus — stake, P&L, win streak
+
 /status       — balance, mode, today's P&L
 /races        — today's qualifying races
 /help         — command list
@@ -178,6 +188,55 @@ def handle_command(cmd: str, state: dict) -> None:
             f"Live P&L tracking starts fresh from zero."
         )
         logger.info(f"Profit reset: cum={old_cum:.2f} banked={old_banked:.2f}")
+
+    # ── Streak betting ────────────────────────────────────────────────────────
+
+    elif cmd == "/streakstart":
+        from betfair.strategy import get_place_stake
+        profit    = state.get("cumulative_profit", 0.0)
+        new_stake = get_place_stake(profit)
+        state["streak_active"]     = True
+        state["streak_stake"]      = new_stake
+        state["streak_peak_stake"] = new_stake
+        save(state)
+        send(
+            f"📈 <b>Streak betting ENABLED</b>\n"
+            f"Starting stake: £{new_stake:.0f}/horse (place market)\n"
+            f"Both picks must place to win.\n"
+            f"Win: reinvest 50% | Loss: reset to £{new_stake:.0f}\n"
+            f"Resets daily at midnight."
+        )
+        logger.info(f"Streak betting enabled at £{new_stake:.0f}/horse")
+
+    elif cmd == "/streakstop":
+        state["streak_active"] = False
+        save(state)
+        pnl  = state.get("streak_daily_pnl", 0.0)
+        sign = "+" if pnl >= 0 else ""
+        send(
+            f"📈 <b>Streak betting DISABLED</b>\n"
+            f"Today's streak P&L: {sign}£{pnl:.2f}\n"
+            f"Best streak: {state.get('streak_best', 0)} wins\n"
+            f"Peak stake: £{state.get('streak_peak_stake', 2.0):.2f}"
+        )
+        logger.info("Streak betting disabled")
+
+    elif cmd == "/streakstatus":
+        active = state.get("streak_active", False)
+        stake  = state.get("streak_stake", 2.0)
+        pnl    = state.get("streak_daily_pnl", 0.0)
+        wins   = state.get("streak_wins", 0)
+        best   = state.get("streak_best", 0)
+        peak   = state.get("streak_peak_stake", 2.0)
+        sign   = "+" if pnl >= 0 else ""
+        send(
+            f"📈 <b>Streak Status</b>\n"
+            f"Active:       {'✅ YES' if active else '❌ NO'}\n"
+            f"Next stake:   £{stake:.2f}/horse\n"
+            f"Win streak:   {wins} (best: {best})\n"
+            f"Peak stake:   £{peak:.2f}\n"
+            f"Today P&L:    {sign}£{pnl:.2f}"
+        )
     # ── Notifications ─────────────────────────────────────────────────────────
 
     elif cmd == "/mute":
