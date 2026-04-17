@@ -386,12 +386,6 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     milestone_alerts = update_cumulative_profit(state, combined_pnl)
     for alert in milestone_alerts:
         send(alert)
-
-    # ── Circuit breaker check ─────────────────────────────────────────────────
-    from betfair.state import check_circuit_breaker
-    circuit_alert = check_circuit_breaker(state)
-    if circuit_alert:
-        send(circuit_alert)
                     
     if total_pnl + place_pnl < 0:
         icon = "❌"
@@ -405,6 +399,12 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     })
     save(state)
 
+    # ── Circuit breaker check ─────────────────────────────────────────────────
+    from betfair.state import check_circuit_breaker
+    circuit_alert = check_circuit_breaker(state)
+    if circuit_alert:
+        send(circuit_alert)
+      
     cum_profit     = state.get("cumulative_profit", 0.0)
     day_place_pnl  = state.get("paper_place_pnl", 0.0)
     sign           = "+" if total_pnl >= 0 else ""
