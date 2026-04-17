@@ -64,26 +64,26 @@ TIER1_CAP_TIERS = {TIER_GOOD, TIER_SKIP}
 # Format: (min_profit, per_horse_stake, redirect_single_stake)
 STAKE_TIERS = [
     (0,    2,   4),
-    (40,   4,   8),
-    (80,   8,   16),
-    (160,  16,  32),
-    (320,  32,  64),
-    (640,  64,  128),
-    (1280, 128, 256),
-    (2560, 256, 512),
-    (5120, 512, 1024),
+    (50,   4,   8),
+    (100,  6,   12),
+    (200,  8,   16),
 ]
 
 STOP_FLOOR = 0.0
 
 
 def get_stake(profit: float) -> float:
-    """Return per-horse win stake based on cumulative NET PROFIT."""
+    """
+    Return per-horse win stake based on cumulative NET PROFIT.
+    Includes a £10 safety buffer — if profit is within £10 above
+    a tier threshold, drops back to the tier below to avoid
+    rapid stake escalation on fragile profit.
+    """
     if profit <= 0:
         return 2.0
     stake = 2.0
     for min_profit, s, _ in STAKE_TIERS:
-        if profit >= min_profit:
+        if profit >= min_profit + 10:
             stake = float(s)
     return stake
 
