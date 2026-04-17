@@ -10,6 +10,7 @@ Commands:
   /stop         — pause betting (both modes)
   /start        — resume betting
   /resetprofit  — reset all paper P&L before going live
+  /breaker      — override circuit breaker and resume betting
   /streakstart  — enable live streak place betting
   /streakstop   — disable streak betting
   /streakstatus — streak stake, P&L, win streak
@@ -60,6 +61,8 @@ HELP_TEXT = """\
 /streakstart  — enable streak place betting
 /streakstop   — disable streak betting
 /streakstatus — stake, P&L, win streak
+
+/breaker      — override circuit breaker and resume
 
 /status       — balance, mode, today's P&L
 /races        — today's qualifying races
@@ -278,6 +281,26 @@ def handle_command(cmd: str, state: dict) -> None:
         )
         logger.info("Betting resumed")
 
+
+    elif cmd == "/breaker":
+        if not state.get("circuit_paused", False):
+            send("ℹ️ Circuit breaker is not currently active.")
+            return
+        peak    = max(state.get("profit_history", [0.0]))
+        profit  = state.get("cumulative_profit", 0.0)
+        state["circuit_paused"] = False
+        state["betting_paused"] = False
+        state["profit_history"] = []  # reset window after override
+        save(state)
+        send(
+            f"⚡ <b>Circuit breaker overridden</b>\n"
+            f"Betting resumed.\n"
+            f"Peak was £{peak:.2f} | Current: £{profit:.2f}\n"
+            f"Loss window reset — monitoring fresh from here.\n"
+            f"⚠️ Proceed with caution."
+        )
+        logger.info(f"Circuit breaker overridden — peak={peak:.2f} profit={profit:.2f}")
+
     # ── Info ──────────────────────────────────────────────────────────────────
 
     elif cmd == "/status":
@@ -294,11 +317,12 @@ def handle_command(cmd: str, state: dict) -> None:
         paper_wins = sum(1 for b in paper_bets if b.get("total_pnl", 0) > 0)
 
         mode_icon = "💰" if mode == "LIVE" else "📝"
+        circuit = state.get("circuit_paused", False)
         lines = [
             "📊 <b>Betfair Bot Status</b>",
             "──────────────────────────────",
             f"Mode:          {mode_icon} {mode}",
-            f"Betting:       {'⏸️ PAUSED' if paused else '▶️ ACTIVE'}",
+            f"Betting:       {'🛑 CIRCUIT BREAKER' if circuit else '⏸️ PAUSED' if paused else '▶️ ACTIVE'}",
             f"Notifications: {'🔕 MUTED' if muted else '🔔 ON'}",
             f"Balance:       £{bal:.2f}",
             f"Stake:         {stake_display(bal)}",
