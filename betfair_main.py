@@ -333,6 +333,7 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
         streak_msg = None
 
         if place_bets and len(place_bets) >= 2:
+            from betfair.strategy import get_place_stake
             streak_msg = update_from_betfair(
                 race          = race,
                 outcome       = outcome,
@@ -342,6 +343,7 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
                 place_price_b = place_bets[1]["price"],
                 std_places    = std_places,
                 cons_places   = cons_places,
+                initial_stake = get_place_stake(state.get("cumulative_profit", 0.0)),
             )
         elif len(paper_bets) >= 2:
             # Fallback: estimate from win prices
