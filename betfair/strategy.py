@@ -73,17 +73,12 @@ STOP_FLOOR = 0.0
 
 
 def get_stake(profit: float) -> float:
-    """
-    Return per-horse win stake based on cumulative NET PROFIT.
-    Includes a £10 safety buffer — if profit is within £10 above
-    a tier threshold, drops back to the tier below to avoid
-    rapid stake escalation on fragile profit.
-    """
+    """Return per-horse win stake based on cumulative NET PROFIT."""
     if profit <= 0:
         return 2.0
     stake = 2.0
     for min_profit, s, _ in STAKE_TIERS:
-        if profit >= min_profit + 10:
+        if profit >= min_profit:
             stake = float(s)
     return stake
 
