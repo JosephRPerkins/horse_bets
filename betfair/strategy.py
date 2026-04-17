@@ -214,7 +214,6 @@ def pick_stakes(profit: float, tsr: bool,
     # When both picks are short but the field drops away sharply,
     # skip win bets but signal place-only via sentinel (-1, -1).
     # Only fires for GOOD, STRONG, SUPREME — not STANDARD/SKIP.
-    pick3_price = kwargs.get("pick3_price")
     if (tier in {TIER_GOOD, TIER_STRONG, TIER_SUPREME}
             and is_two_horse_race(pick1_price, pick2_price, pick3_price)):
         return -1.0, -1.0
