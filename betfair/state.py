@@ -77,12 +77,14 @@ def reset_daily(state: dict) -> dict:
     if profit > 0:
         banked  = (profit // 50) * 50
         carry   = round(profit - banked, 2)
-        # Safety buffer: if carry is within £10 of next £50, bank one more tier
-        if carry >= 40:
-            banked += 50
+        # Safety buffer: if profit is within £10 above a £50 boundary,
+        # bank one tier less so carry forward isn't dangerously fragile
+        if carry < 10 and banked >= 50:
+            banked -= 50
             carry   = round(profit - banked, 2)
-            if carry < 0:
-                carry = 0.0
+        state["banked_profit"]     = round(state.get("banked_profit", 0.0) + banked, 2)
+        state["cumulative_profit"] = carry
+        logger.info(f"Daily banking: banked £{banked:.0f}, carrying forward £{carry:.2f}")
         state["banked_profit"]     = round(state.get("banked_profit", 0.0) + banked, 2)
         state["cumulative_profit"] = carry
         logger.info(f"Daily banking: banked £{banked:.0f}, carrying forward £{carry:.2f}")
