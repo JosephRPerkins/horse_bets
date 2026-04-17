@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from predict_v2 import TIER_STRONG, TIER_SUPREME, TIER_STD, TIER_SKIP, TIER_GOOD
 
-SKIP_SURFACES   = {"AW"}
+SKIP_SURFACES   = set()
 SKIP_GOING_KEYS = {"heavy", "soft to heavy", "heavy to soft"}
 
 ATTRITION_VENUES = {"fairyhouse", "cork", "punchestown", "naas", "leopardstown"}
