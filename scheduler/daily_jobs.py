@@ -70,24 +70,72 @@ def midnight_job():
     except Exception as e:
         logger.warning(f"midnight_job: streak reset failed: {e}")
 
-    client = RacingAPIClient()
-    try:
-        tomorrow_str = date.today().strftime("%Y-%m-%d")   # midnight = new day
-        racecards    = client.get_tomorrows_racecards(
-            region_codes=config.TARGET_REGIONS
-        )
-        path = os.path.join(config.DIR_CARDS, "tomorrow.json")
-        with open(path, "w") as f:
-            json.dump({"date": tomorrow_str, "racecards": racecards}, f)
-        logger.info(f"midnight_job: saved {len(racecards)} races to {path}")
+    # Retry up to 3 times if card comes back empty
+    MAX_RETRIES = 3
+    for attempt in range(MAX_RETRIES):
+        try:
+            tomorrow_str = date.today().strftime("%Y-%m-%d")
+            racecards    = client.get_tomorrows_racecards(
+                region_codes=config.TARGET_REGIONS
+            )
+            if not racecards:
+                logger.warning(f"midnight_job: empty card on attempt {attempt+1}")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(300)  # wait 5 mins before retry
+                    continue
+                # All retries exhausted
+                from notifications.telegram import send_main
+                send_main(
+                    f"⚠️ <b>Midnight card fetch failed</b>\n"
+                    f"No races returned after {MAX_RETRIES} attempts.\n"
+                    f"Today's races will need manual fetch — send /refresh."
+                )
+                logger.error("midnight_job: all retries exhausted, no races")
+                break
 
-        # Also save as today.json so betfair bot can read it immediately
-        today_path = os.path.join(config.DIR_CARDS, "today.json")
-        with open(today_path, "w") as f:
-            json.dump({"date": tomorrow_str, "racecards": racecards}, f)
-        logger.info(f"midnight_job: also saved to today.json")
-    except Exception as e:
-        logger.error(f"midnight_job failed: {e}")
+            # Analyse races through the full pipeline
+            norm_racecards = []
+            for race in racecards:
+                from api.racing_api import RacingAPIClient as RC
+                norm_runners = [RC.normalise_runner(r)
+                                for r in race.get("runners", [])]
+                norm_racecards.append({**race, "runners": norm_runners})
+
+            analysed = [_analyse_race(r) for r in norm_racecards]
+
+            # Save tomorrow.json (raw)
+            path = os.path.join(config.DIR_CARDS, "tomorrow.json")
+            with open(path, "w") as f:
+                json.dump({"date": tomorrow_str, "racecards": racecards}, f)
+
+            # Save today.json (analysed, ready for betfair bot)
+            today_path = os.path.join(config.DIR_CARDS, "today.json")
+            with open(today_path, "w") as f:
+                json.dump({"date": tomorrow_str, "races": analysed},
+                          f, indent=2, default=str)
+
+            logger.info(
+                f"midnight_job: saved {len(analysed)} analysed races "
+                f"to today.json (attempt {attempt+1})"
+            )
+            from notifications.telegram import send_main
+            send_main(
+                f"🌙 <b>Midnight card fetched</b>\n"
+                f"{len(analysed)} races loaded for {tomorrow_str}."
+            )
+            break
+
+        except Exception as e:
+            logger.error(f"midnight_job attempt {attempt+1} failed: {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(300)
+            else:
+                from notifications.telegram import send_main
+                send_main(
+                    f"❌ <b>Midnight card fetch error</b>\n"
+                    f"Exception after {MAX_RETRIES} attempts: {e}\n"
+                    f"Send /refresh manually in the morning."
+                )
 
 
 # ── Morning briefing job ───────────────────────────────────────────────────────
