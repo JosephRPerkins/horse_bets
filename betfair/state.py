@@ -37,6 +37,13 @@ def _empty() -> dict:
         "profit_milestone":    0.0,
         "paper_place_pnl":     0.0,
         "banked_profit":       0.0,
+        "streak_active":      False,
+        "streak_stake":       2.0,
+        "streak_daily_pnl":   0.0,
+        "streak_daily_bets":  [],
+        "streak_wins":        0,
+        "streak_best":        0,
+        "streak_peak_stake":  2.0,
     }
 
 
@@ -88,6 +95,18 @@ def reset_daily(state: dict) -> dict:
         state["banked_profit"]     = round(state.get("banked_profit", 0.0) + banked, 2)
         state["cumulative_profit"] = carry
         logger.info(f"Daily banking: banked £{banked:.0f}, carrying forward £{carry:.2f}")
+
+    # Reset streak daily counters — stake resets to current tier
+    if state.get("streak_active", False):
+        from betfair.strategy import get_place_stake
+        new_stake = get_place_stake(state.get("cumulative_profit", 0.0))
+        state["streak_stake"]      = new_stake
+        state["streak_peak_stake"] = new_stake
+    state["streak_daily_pnl"]  = 0.0
+    state["streak_daily_bets"] = []
+    state["streak_wins"]       = 0
+    state["streak_best"]       = 0
+  
     save(state)
     return state
 
