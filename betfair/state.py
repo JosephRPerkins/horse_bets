@@ -37,6 +37,8 @@ def _empty() -> dict:
         "profit_milestone":    0.0,
         "paper_place_pnl":     0.0,
         "banked_profit":       0.0,
+        "profit_history":     [],
+        "circuit_paused":     False,
         "streak_active":      False,
         "streak_stake":       2.0,
         "streak_daily_pnl":   0.0,
@@ -75,6 +77,8 @@ def reset_daily(state: dict) -> dict:
     state["paper_daily_pnl"]  = 0.0
     state["paper_daily_bets"] = []
     state["paper_place_pnl"]  = 0.0
+    state["profit_history"] = []
+    state["circuit_paused"] = False
     
     # ── Daily banking ─────────────────────────────────────────────────────────
     # Bank profit to nearest £50 floor, carry forward remainder.
@@ -146,3 +150,58 @@ def update_cumulative_profit(state: dict, pnl: float) -> list:
             )
 
     return alerts
+
+def check_circuit_breaker(state: dict) -> str | None:
+    """
+    Called after every race settlement.
+    Checks if cumulative profit has fallen significantly from a recent peak,
+    crossing below a £100 checkpoint by at least £75.
+
+    Conditions to trigger:
+    1. Rolling window of last 10 races contains a peak
+    2. Nearest £100 checkpoint below that peak has a gap of >= £75
+    3. Current profit has fallen to or below that checkpoint
+
+    Returns alert string if triggered, None otherwise.
+    """
+    profit  = state.get("cumulative_profit", 0.0)
+    history = state.get("profit_history", [])
+
+    history.append(round(profit, 2))
+    if len(history) > 10:
+        history = history[-10:]
+    state["profit_history"] = history
+
+    if len(history) < 2 or state.get("circuit_paused", False):
+        return None
+
+    peak = max(history)
+
+    # Find the highest £100 checkpoint below the peak
+    # where the gap from peak to checkpoint is >= £75
+    checkpoint = (peak // 100) * 100
+    while checkpoint >= 0:
+        gap = peak - checkpoint
+        if gap >= 75:
+            # This is a checkpoint worth protecting
+            if profit <= checkpoint:
+                # Profit has fallen to or below this checkpoint — trigger
+                state["circuit_paused"] = True
+                state["betting_paused"] = True
+                save(state)
+                return (
+                    f"🛑 <b>Circuit breaker triggered</b>\n"
+                    f"Peak profit (last 10 races): £{peak:.2f}\n"
+                    f"Current profit: £{profit:.2f}\n"
+                    f"Dropped £{peak - profit:.2f} from peak, "
+                    f"crossing £{checkpoint:.0f} checkpoint.\n"
+                    f"All betting paused to protect capital.\n"
+                    f"------------------------------\n"
+                    f"Send /breaker to override and continue.\n"
+                    f"Resets automatically at midnight."
+                )
+            break
+        # Gap too small at this checkpoint — try next one down
+        checkpoint -= 100
+
+    return None
