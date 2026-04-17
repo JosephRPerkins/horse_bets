@@ -48,11 +48,12 @@ HELP_TEXT = """\
 /unmute  — resume notifications
 
 <b>Control</b>
-/stop    — pause betting (both modes)
-/start   — resume betting
-/status  — balance, mode, today's P&L
-/races   — today's qualifying races
-/help    — this message
+/stop         — pause betting (both modes)
+/start        — resume betting
+/resetprofit  — reset all paper P&L before going live
+/status       — balance, mode, today's P&L
+/races        — today's qualifying races
+/help         — command list
 ══════════════════════════════
 <b>Strategy</b>
 Qualifying: All tiers except GOOD | Turf | Not Heavy
@@ -135,17 +136,48 @@ def handle_command(cmd: str, state: dict) -> None:
         logger.info("Switched to paper mode")
 
     elif cmd == "/live":
-        bal = get_balance()
+        bal        = get_balance()
+        cum_profit = state.get("cumulative_profit", 0.0)
+        banked     = state.get("banked_profit", 0.0)
         state["mode"] = "live"
         save(state)
+        warning = ""
+        if cum_profit > 0 or banked > 0:
+            warning = (
+                f"\n⚠️ Paper cumulative profit: £{cum_profit:.2f} | Banked: £{banked:.2f}\n"
+                f"Send /resetprofit to clear paper figures before live trading.\n"
+                f"Without resetting, live stakes will be inflated by paper profits."
+            )
         send(
             f"💰 <b>Switched to LIVE mode</b>\n"
             f"Real bets will now be placed on Betfair Exchange.\n"
-            f"Balance: £{bal:.2f} | {stake_display(bal)}\n"
+            f"Balance: £{bal:.2f} | {stake_display(cum_profit)}{warning}\n"
             f"⚠️ This uses real money. Send /paper to return to simulation."
         )
         logger.info("Switched to live mode")
 
+    elif cmd == "/resetprofit":
+        old_cum    = state.get("cumulative_profit", 0.0)
+        old_banked = state.get("banked_profit", 0.0)
+        old_place  = state.get("paper_place_pnl", 0.0)
+        # Reset all paper-derived profit figures
+        state["cumulative_profit"]  = 0.0
+        state["banked_profit"]      = 0.0
+        state["paper_daily_pnl"]    = 0.0
+        state["paper_daily_bets"]   = []
+        state["paper_place_pnl"]    = 0.0
+        state["profit_milestone"]   = 0.0
+        save(state)
+        send(
+            f"🔄 <b>Profit reset for live trading</b>\n"
+            f"Cleared:\n"
+            f"  Cumulative P&L: £{old_cum:.2f} → £0.00\n"
+            f"  Banked profit:  £{old_banked:.2f} → £0.00\n"
+            f"  Place P&L:      £{old_place:.2f} → £0.00\n"
+            f"Stakes now reset to £{get_stake(0.0):.0f}/horse (base tier).\n"
+            f"Live P&L tracking starts fresh from zero."
+        )
+        logger.info(f"Profit reset: cum={old_cum:.2f} banked={old_banked:.2f}")
     # ── Notifications ─────────────────────────────────────────────────────────
 
     elif cmd == "/mute":
