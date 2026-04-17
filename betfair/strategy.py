@@ -52,8 +52,8 @@ MIN_PICK2_PRICE_FOR_REDIRECT = 4.0
 MIN_BACK_PRICE = 1.5
 MIN_LIQUIDITY  = 2.0
 
-TOPUP_WARNING  = 10.0
-TOPUP_CRITICAL = 4.0
+# Topup thresholds are dynamic — calculated in check_topup_alerts()
+# based on current stake tier (3x race cost = warning, 1x = critical)
 
 TIER1_CAP_TIERS = {TIER_GOOD, TIER_SKIP}
 
@@ -296,23 +296,32 @@ def check_topup_alerts(balance: float, profit: float,
                        prev_stake) -> list:
     alerts     = []
     curr_stake = get_stake(profit)
+    p_stake    = get_place_stake(profit)
+
+    # Dynamic thresholds based on current tier
+    # One full race = 2 win bets + 2 place bets
+    race_cost    = (curr_stake * 2) + (p_stake * 2)
+    warning_bal  = race_cost * 3   # can cover 3 more races
+    critical_bal = race_cost       # can only cover 1 more race
 
     if balance <= 0:
         alerts.append(
             f"🛑 <b>Session halted</b> — balance £{balance:.2f}\n"
-            f"Top up to continue. Minimum £2 to place a bet."
+            f"Top up to continue. Minimum £{curr_stake:.0f} to place a bet."
         )
-    elif balance < TOPUP_CRITICAL:
-        needed = TOPUP_WARNING - balance
+    elif balance < critical_bal:
+        needed = warning_bal - balance
         alerts.append(
             f"🚨 <b>Critical: £{balance:.2f} remaining</b>\n"
-            f"Top up £{needed:.2f} to clear the warning threshold."
+            f"Only enough for {int(balance // race_cost)} more race(s) at £{curr_stake:.0f}/horse.\n"
+            f"Top up £{needed:.2f} to reach comfortable level."
         )
-    elif balance < TOPUP_WARNING:
-        needed = 20.0 - balance
+    elif balance < warning_bal:
+        needed = warning_bal - balance
         alerts.append(
-            f"⚠️ <b>Balance at £{balance:.2f}</b>\n"
-            f"Top up £{needed:.2f} to reach the £4/horse tier."
+            f"⚠️ <b>Balance low: £{balance:.2f}</b>\n"
+            f"Enough for ~{int(balance // race_cost)} more race(s) at £{curr_stake:.0f}/horse.\n"
+            f"Consider topping up £{needed:.2f}."
         )
 
     if prev_stake is not None and curr_stake != prev_stake:
