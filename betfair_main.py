@@ -1003,7 +1003,7 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
                 tier=r.get("tier", 0), pick2_score=p2_sc
             )
             off_dt  = _parse_off_dt(r)
-            bet_at  = (off_dt - timedelta(minutes=BET_BEFORE_MINUTES)).strftime("%H:%M") if off_dt else "?"
+            bet_at  = (off_dt - timedelta(minutes=BET_BEFORE_MINUTES) + timedelta(hours=1)).strftime("%H:%M") if off_dt else "?"
             p1_note = " (odds-on→skip)" if (a_price and a_price < MIN_PICK1_PRICE) else ""
             p2_note = " (solo P1)" if (b_price and b_price is not None and b_price < MIN_PICK2_PRICE) else ""
             lines.append(
