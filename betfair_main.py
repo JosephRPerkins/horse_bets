@@ -855,6 +855,7 @@ def end_of_day_job(state: dict):
         "==============================",
         f"Balance:          £{bal:.2f}",
         f"Cumulative P&L:   {profit_sign}£{profit:.2f}  (win + place)",
+        f"Banked profit:    £{state.get('banked_profit', 0.0):.2f}",
         f"Current tier:     £{get_stake(profit):.0f}/horse",
         f"Next tier at:     £{_next_tier_threshold(profit):.0f} profit",
     ]
@@ -974,6 +975,7 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             "==============================",
             f"Balance:          £{bal:.2f}",
             f"Cumulative P&L:   {profit_sign}£{profit:.2f}  (win + place)",
+            f"Banked profit:    £{state.get('banked_profit', 0.0):.2f}",
             f"Win tier:         £{get_stake(profit):.0f}/horse",
             f"Place tier:       £{p_stake:.0f}/horse",
             f"Next tier at:     £{_next_tier_threshold(profit):.0f} profit",
