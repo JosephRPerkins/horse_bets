@@ -126,6 +126,7 @@ def update_from_betfair(
     place_price_b: float,
     std_places:    int,
     cons_places:   int,
+    initial_stake: float = 10.0,
 ) -> str | None:
     """
     Update streak tracker using actual Betfair place market prices.
@@ -171,6 +172,7 @@ def update_from_betfair(
         price_source = "Betfair",
         price_a      = place_price_a,
         price_b      = place_price_b,
+        initial_stake = initial_stake,
     )
 
 
@@ -231,7 +233,8 @@ def _run_update(
     cons_N:       int,
     price_source: str,
     price_a:      float,
-    price_b:      float,
+    price_b:      float,    
+    initial_stake: float = 10.0,
 ) -> str:
     """Internal: apply results to both trackers and build Telegram message."""
     std_tracker  = _state["std"]
@@ -242,8 +245,8 @@ def _run_update(
     std_prev_streak  = std_tracker["streak"]
     cons_prev_streak = cons_tracker["streak"]
 
-    _apply_result(std_tracker,  std_won,  std_odds)
-    _apply_result(cons_tracker, cons_won, cons_odds)
+    _apply_result(std_tracker,  std_won,  std_odds,  initial_stake)
+    _apply_result(cons_tracker, cons_won, cons_odds, initial_stake)
 
     save_state()
 
@@ -279,16 +282,18 @@ def _run_update(
     return "\n".join(lines)
 
 
-def _apply_result(tracker: dict, won: bool, odds: float) -> None:
+def _apply_result(tracker: dict, won: bool, odds: float,
+                  initial_stake: float = 10.0) -> None:
     stake = tracker["balance"]
     if won:
         profit = stake * (odds - 1.0)
-        tracker["balance"]     = round(tracker["balance"] + profit, 2)
+        # Only reinvest half the profit — bank the other half
+        tracker["balance"]     = round(tracker["balance"] + profit * 0.5, 2)
         tracker["streak"]      += 1
         tracker["best_streak"] = max(tracker["best_streak"], tracker["streak"])
         tracker["peak"]        = max(tracker["peak"], tracker["balance"])
     else:
-        tracker["balance"] = INITIAL_STAKE
+        tracker["balance"] = initial_stake
         tracker["streak"]  = 0
 
 
@@ -302,11 +307,13 @@ def _format_tracker_block(
 ) -> list:
     lines = [label]
     if won:
-        profit  = round(prev_bal * (odds - 1.0), 2)
-        new_bal = tracker["balance"]
+        profit    = round(prev_bal * (odds - 1.0), 2)
+        reinvest  = round(profit * 0.5, 2)
+        banked    = round(profit * 0.5, 2)
+        new_bal   = tracker["balance"]
         lines.append(
             f"  ✅ Win streak: {tracker['streak']}  |  "
-            f"£{prev_bal:.2f} → £{new_bal:.2f} (+£{profit:.2f})"
+            f"£{prev_bal:.2f} → £{new_bal:.2f} (+£{reinvest:.2f} reinvested, £{banked:.2f} banked)"
         )
         lines.append(f"  Combined odds: {odds:.2f}")
     else:
