@@ -15,6 +15,7 @@ import os
 import json
 import logging
 from datetime import datetime, date
+import time
 
 import config
 from core.api_client import RacingAPIClient
