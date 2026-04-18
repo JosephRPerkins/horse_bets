@@ -74,6 +74,7 @@ def midnight_job():
     MAX_RETRIES = 3
     for attempt in range(MAX_RETRIES):
         try:
+            client       = RacingAPIClient()
             tomorrow_str = date.today().strftime("%Y-%m-%d")
             racecards    = client.get_tomorrows_racecards(
                 region_codes=config.TARGET_REGIONS
