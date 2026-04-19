@@ -114,8 +114,8 @@ def analyse_race(race: dict) -> dict | None:
     if len(runners) < 2:
         return None
     scored = []
-    for r in runners:
-        sc = score_runner(r)
+for r in runners:
+        sc, _ = score_runner(r)
         scored.append({**r, "score": sc})
     scored.sort(key=lambda x: x["score"], reverse=True)
 
