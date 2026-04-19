@@ -108,10 +108,20 @@ def qualifies(race: dict, tier: int) -> bool:
         return False
     return True
 
+def has_ratings(race: dict) -> bool:
+    """Return True if at least one runner has valid TSR or RPR."""
+    for r in race.get("runners") or []:
+        tsr = str(r.get("tsr") or "").strip()
+        rpr = str(r.get("rpr") or "").strip()
+        if (tsr and tsr not in ("", "–", "-")) or (rpr and rpr not in ("", "–", "-")):
+            return True
+    return False
 
 def analyse_race(race: dict) -> dict | None:
     runners = race.get("runners") or []
     if len(runners) < 2:
+        return None
+    if not has_ratings(race):
         return None
     scored = []
     for r in runners:
