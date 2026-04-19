@@ -595,7 +595,7 @@ def _live_bet_job(race: dict, state: dict):
         bet = place_back(market_id, sel_id, live_price, stake)
         if bet:
             bet["horse_name"] = horse
-            matched = bet.get("size_matched", stake)
+            matched = bet.get("size_matched") or stake
             tag = f"⏳" if bet.get("pending") else "✅"
             lines.append(f"{tag} {label}: {horse} @ {live_price} £{matched:.2f} (liq: £{liq:.0f})")
             return bet
@@ -666,7 +666,7 @@ def _live_bet_job(race: dict, state: dict):
                 place_bet = place_back(place_mkt.market_id, sel_id, p_price, p_stake)
                 if place_bet:
                     place_bet["horse_name"] = horse
-                    matched_p = place_bet.get("size_matched", p_stake)
+                    matched_p = place_bet.get("size_matched") or p_stake
                     tag = "⏳" if place_bet.get("pending") else "✅"
                     place_lines.append(
                         f"{tag} 📍 {horse} @ {p_price:.2f} £{matched_p:.2f} (liq: £{p_liq:.0f})"
