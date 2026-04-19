@@ -232,3 +232,320 @@ print(f"  Pick 2 place rate:  {all_bplc/all_total*100:.1f}%  ({all_bplc}/{all_to
 print(f"  Both placed (std):  {all_stdw/all_total*100:.1f}%  ({all_stdw}/{all_total})")
 print(f"  Both placed (cons): {all_consw/all_total*100:.1f}%  ({all_consw}/{all_total})")
 print()
+
+# ── Section 8: Winner rank distribution ───────────────────────────────────────
+
+winner_rank  = {}
+p1p2_data    = []   # (p1_sp, p2_sp, gap, tier_label, p1_won, p2_won, p1_plc, p2_plc, n_runners)
+race_cats    = []   # (category, tier, gap, n, p1_sp, p2_sp, market_agrees)
+
+for date, day in sorted(history.items()):
+    for rec in day.get("races", []):
+        rid = rec.get("race_id")
+        raw = raw_index.get(rid)
+        if not raw:
+            continue
+        runners = raw.get("runners", [])
+        if len(runners) < 2:
+            continue
+
+        scored = sorted(
+            [{**r, "score": score_runner(r)[0]} for r in runners],
+            key=lambda x: -x["score"]
+        )
+        raw2     = {**raw, "runners": scored}
+        tier, _  = race_confidence(raw2, scored[0]["score"])
+        label    = TIER_LABELS.get(tier, "?").split()[0]
+        p1       = scored[0]
+        p2       = scored[1]
+        p1_sp    = to_float(p1.get("sp_dec"))
+        p2_sp    = to_float(p2.get("sp_dec"))
+        gap      = p1.get("score", 0) - p2.get("score", 0)
+        n        = len(runners)
+        p1_won   = rec.get("a_pos") == 1
+        p2_won   = rec.get("b_pos") == 1
+        p1_plc   = bool(rec.get("std_a") or rec.get("cons_a"))
+        p2_plc   = bool(rec.get("std_b") or rec.get("cons_b"))
+        mkt_ok   = bool(p1_sp and p2_sp and p1_sp <= p2_sp)
+
+        # Winner rank
+        winner = next((r for r in runners if str(r.get("position", "")) == "1"), None)
+        rank = None
+        if winner:
+            for i, r in enumerate(scored):
+                if r.get("horse") == winner.get("horse"):
+                    rank = i + 1
+                    break
+        winner_rank[rank] = winner_rank.get(rank, 0) + 1
+
+        p1p2_data.append((p1_sp, p2_sp, gap, label, p1_won, p2_won, p1_plc, p2_plc, n))
+
+        # Race category
+        if not p1_plc and not p2_plc:
+            cat = "both_loss"
+        elif p1_won or p2_won:
+            cat = "both_win"
+        else:
+            cat = "place_only_win"
+        race_cats.append((cat, label, gap, n, p1_sp, p2_sp, mkt_ok))
+
+print(f"{'='*76}")
+print(f"  WINNER RANK IN MODEL SCORING")
+print(f"{'='*76}")
+total_ranked = sum(winner_rank.values())
+cumulative = 0
+for rank in sorted(k for k in winner_rank if k is not None):
+    n_r = winner_rank[rank]
+    cumulative += n_r
+    print(f"  Rank {rank:>2}: {n_r:>4} races  ({n_r/total_ranked*100:.1f}%)  "
+          f"cumulative top-{rank}: {cumulative/total_ranked*100:.1f}%")
+missed = winner_rank.get(None, 0)
+if missed:
+    print(f"  Winner not in scored runners: {missed}")
+print()
+
+# ── Section 9: P1/P2 price ratio ─────────────────────────────────────────────
+
+ratio_stats = {}
+for p1_sp, p2_sp, gap, label, p1_won, p2_won, p1_plc, p2_plc, n in p1p2_data:
+    if not p1_sp or not p2_sp:
+        continue
+    ratio = p2_sp / p1_sp
+    if ratio < 1.0:      rbkt = "P2 shorter than P1"
+    elif ratio < 1.5:    rbkt = "P2 1.0-1.5x P1"
+    elif ratio < 2.5:    rbkt = "P2 1.5-2.5x P1"
+    elif ratio < 4.0:    rbkt = "P2 2.5-4.0x P1"
+    else:                rbkt = "P2 4x+ P1"
+    if rbkt not in ratio_stats:
+        ratio_stats[rbkt] = {"n":0,"p1w":0,"p2w":0,"p1p":0,"p2p":0}
+    s = ratio_stats[rbkt]
+    s["n"]  += 1
+    if p1_won: s["p1w"] += 1
+    if p2_won: s["p2w"] += 1
+    if p1_plc: s["p1p"] += 1
+    if p2_plc: s["p2p"] += 1
+
+print(f"{'='*76}")
+print(f"  P1/P2 PRICE RATIO — does relative price predict which pick wins?")
+print(f"{'='*76}")
+print(f"  {'Ratio band':<22} {'N':>5} {'P1win%':>8} {'P2win%':>8} {'P1plc%':>8} {'P2plc%':>8}")
+print(f"  {'-'*62}")
+for rbkt in ["P2 shorter than P1","P2 1.0-1.5x P1","P2 1.5-2.5x P1","P2 2.5-4.0x P1","P2 4x+ P1"]:
+    s = ratio_stats.get(rbkt)
+    if not s or s["n"] == 0:
+        continue
+    print(f"  {rbkt:<22} {s['n']:>5} "
+          f"{s['p1w']/s['n']*100:>7.1f}% "
+          f"{s['p2w']/s['n']*100:>7.1f}% "
+          f"{s['p1p']/s['n']*100:>7.1f}% "
+          f"{s['p2p']/s['n']*100:>7.1f}%")
+print()
+
+# ── Section 10: Score gap vs win rate ─────────────────────────────────────────
+
+gap_stats = {}
+for p1_sp, p2_sp, gap, label, p1_won, p2_won, p1_plc, p2_plc, n in p1p2_data:
+    if gap <= 0:      gbkt = "gap 0 (tied)"
+    elif gap == 1:    gbkt = "gap 1"
+    elif gap == 2:    gbkt = "gap 2"
+    elif gap <= 4:    gbkt = "gap 3-4"
+    else:             gbkt = "gap 5+"
+    if gbkt not in gap_stats:
+        gap_stats[gbkt] = {"n":0,"p1w":0,"p2w":0,"p1p":0,"p2p":0}
+    s = gap_stats[gbkt]
+    s["n"]  += 1
+    if p1_won: s["p1w"] += 1
+    if p2_won: s["p2w"] += 1
+    if p1_plc: s["p1p"] += 1
+    if p2_plc: s["p2p"] += 1
+
+print(f"{'='*76}")
+print(f"  P1-P2 SCORE GAP — does a bigger gap mean P1 is more reliable?")
+print(f"{'='*76}")
+print(f"  {'Score gap':<22} {'N':>5} {'P1win%':>8} {'P2win%':>8} {'P1plc%':>8} {'P2plc%':>8}")
+print(f"  {'-'*62}")
+for gbkt in ["gap 0 (tied)","gap 1","gap 2","gap 3-4","gap 5+"]:
+    s = gap_stats.get(gbkt)
+    if not s or s["n"] == 0:
+        continue
+    print(f"  {gbkt:<22} {s['n']:>5} "
+          f"{s['p1w']/s['n']*100:>7.1f}% "
+          f"{s['p2w']/s['n']*100:>7.1f}% "
+          f"{s['p1p']/s['n']*100:>7.1f}% "
+          f"{s['p2p']/s['n']*100:>7.1f}%")
+print()
+
+# ── Section 11: Combined signal ───────────────────────────────────────────────
+
+combined_stats = {}
+for p1_sp, p2_sp, gap, label, p1_won, p2_won, p1_plc, p2_plc, n in p1p2_data:
+    if not p1_sp or not p2_sp:
+        continue
+    strong_gap    = gap >= 3
+    market_agrees = p1_sp <= p2_sp
+    if strong_gap and market_agrees:       key = "Strong gap + market agrees"
+    elif strong_gap and not market_agrees: key = "Strong gap + mkt disagrees"
+    elif not strong_gap and market_agrees: key = "Weak gap + market agrees"
+    else:                                  key = "Weak gap + mkt disagrees"
+    if key not in combined_stats:
+        combined_stats[key] = {"n":0,"p1w":0,"p2w":0,"p1p":0}
+    s = combined_stats[key]
+    s["n"]  += 1
+    if p1_won: s["p1w"] += 1
+    if p2_won: s["p2w"] += 1
+    if p1_plc: s["p1p"] += 1
+
+print(f"{'='*76}")
+print(f"  COMBINED SIGNAL: score gap + market agreement")
+print(f"  'market agrees' = P1 SP <= P2 SP  |  'strong gap' = score gap >= 3")
+print(f"{'='*76}")
+print(f"  {'Condition':<35} {'N':>5} {'P1win%':>8} {'P2win%':>8} {'P1plc%':>8}")
+print(f"  {'-'*65}")
+for key in ["Strong gap + market agrees","Strong gap + mkt disagrees",
+            "Weak gap + market agrees","Weak gap + mkt disagrees"]:
+    s = combined_stats.get(key)
+    if not s or s["n"] == 0:
+        continue
+    print(f"  {key:<35} {s['n']:>5} "
+          f"{s['p1w']/s['n']*100:>7.1f}% "
+          f"{s['p2w']/s['n']*100:>7.1f}% "
+          f"{s['p1p']/s['n']*100:>7.1f}%")
+print()
+
+# ── Section 12: Race category profiles ───────────────────────────────────────
+
+def profile_cat(races, name):
+    if not races:
+        return
+    n = len(races)
+    tiers = {}
+    for _, t, *_ in races:
+        tiers[t] = tiers.get(t, 0) + 1
+    gaps      = [g for _, _, g, *_ in races]
+    fields    = [f for _, _, _, f, *_ in races]
+    sps       = [p for _, _, _, _, p, *_ in races if p]
+    agrees    = sum(1 for *_, m in races if m)
+    print(f"  {name} ({n} races)")
+    print(f"    Tiers:          {dict(sorted(tiers.items(), key=lambda x: -x[1]))}")
+    print(f"    Avg score gap:  {sum(gaps)/len(gaps):.2f}  "
+          f"(gap>=3: {sum(1 for g in gaps if g>=3)}/{n} = {sum(1 for g in gaps if g>=3)/n*100:.0f}%)")
+    print(f"    Avg field size: {sum(fields)/len(fields):.1f}")
+    print(f"    Avg P1 SP:      {sum(sps)/len(sps):.2f}" if sps else "    Avg P1 SP: n/a")
+    print(f"    Market agrees:  {agrees}/{n} ({agrees/n*100:.0f}%)")
+    print()
+
+print(f"{'='*76}")
+print(f"  RACE OUTCOME CATEGORY PROFILES")
+print(f"{'='*76}")
+print()
+both_loss  = [r for r in race_cats if r[0] == "both_loss"]
+place_win  = [r for r in race_cats if r[0] == "place_only_win"]
+both_win   = [r for r in race_cats if r[0] == "both_win"]
+profile_cat(both_loss, "BOTH LOSS — neither pick placed")
+profile_cat(place_win, "PLACE-WIN ONLY — win bet lost, place saved it")
+profile_cat(both_win,  "BOTH WIN — win + place both returned")
+
+# ── Section 13: Both-loss predictors ─────────────────────────────────────────
+
+print(f"{'='*76}")
+print(f"  BOTH-LOSS RATE BY KEY VARIABLES")
+print(f"{'='*76}")
+all_races = race_cats
+
+print()
+print("  By score gap:")
+print(f"  {'Gap':<12} {'Total':>6} {'BothLoss':>10} {'Rate':>8}")
+for thresh, label in [(0,"gap=0"),(1,"gap=1"),(2,"gap=2")]:
+    grp = [c for c, _, g, *_ in all_races if g == thresh]
+    bl  = sum(1 for c in grp if c == "both_loss")
+    if grp:
+        print(f"  {label:<12} {len(grp):>6} {bl:>10} {bl/len(grp)*100:>7.1f}%")
+grp = [c for c, _, g, *_ in all_races if g >= 3]
+bl  = sum(1 for c in grp if c == "both_loss")
+if grp:
+    print(f"  {'gap>=3':<12} {len(grp):>6} {bl:>10} {bl/len(grp)*100:>7.1f}%")
+
+print()
+print("  By field size:")
+print(f"  {'Field':>10} {'Total':>6} {'BothLoss':>10} {'Rate':>8}")
+for lo, hi, lbl in [(2,5,"2-5"),(6,8,"6-8"),(9,12,"9-12"),(13,99,"13+")]:
+    grp = [c for c, _, _, n, *_ in all_races if lo <= n <= hi]
+    bl  = sum(1 for c in grp if c == "both_loss")
+    if grp:
+        print(f"  {lbl:>10} {len(grp):>6} {bl:>10} {bl/len(grp)*100:>7.1f}%")
+
+print()
+print("  By P1 SP band:")
+print(f"  {'SP band':<16} {'Total':>6} {'BothLoss':>10} {'Rate':>8}")
+for lo, hi, lbl in [(0,2,"odds-on <2"),(2,3,"2.0-2.9"),(3,5,"3.0-4.9"),
+                    (5,8,"5.0-7.9"),(8,13,"8.0-12.9"),(13,999,"13.0+")]:
+    grp = [c for c, _, _, _, sp, *_ in all_races if sp and lo <= sp < hi]
+    bl  = sum(1 for c in grp if c == "both_loss")
+    if grp:
+        print(f"  {lbl:<16} {len(grp):>6} {bl:>10} {bl/len(grp)*100:>7.1f}%")
+
+print()
+print("  By market agreement:")
+for agrees, lbl in [(True,"Mkt agrees"),(False,"Mkt disagrees")]:
+    grp = [c for c, _, _, _, _, _, m in all_races if m == agrees]
+    bl  = sum(1 for c in grp if c == "both_loss")
+    if grp:
+        print(f"  {lbl:<16} total={len(grp)}  both_loss={bl} ({bl/len(grp)*100:.1f}%)")
+print()
+
+# ── Section 14: Place bet EV summary ─────────────────────────────────────────
+
+print(f"{'='*76}")
+print(f"  PLACE BET VALUE — estimated EV by race conditions")
+print(f"  Using BSP to estimate place return: place_odds = (win_bsp-1)/divisor + 1")
+print(f"  Betfair place divisors: 5-7 runners=4, 8-11=5, 12+=6")
+print(f"{'='*76}")
+print()
+
+def place_divisor(n):
+    if n <= 4:  return None   # win only
+    if n <= 7:  return 4.0
+    if n <= 11: return 5.0
+    return 6.0
+
+ev_stats = {}
+for p1_sp, p2_sp, gap, label, p1_won, p2_won, p1_plc, p2_plc, n in p1p2_data:
+    # Use BSP from raw data if available, fall back to sp_dec
+    div = place_divisor(n)
+    if not div or not p1_sp:
+        continue
+    est_place_odds = (p1_sp - 1.0) / div + 1.0
+
+    # EV of £1 place bet = P(place) * (est_place_odds - 1) - P(not place)
+    p_place = 1.0 if p1_plc else 0.0   # actual outcome
+    win_ev  = (p1_sp - 1.0) if p1_won else -1.0
+    plc_ev  = (est_place_odds - 1.0) if p1_plc else -1.0
+
+    # Bucket by field size
+    if n <= 7:    fbkt = "5-7 runners (2 places)"
+    elif n <= 11: fbkt = "8-11 runners (3 places)"
+    else:         fbkt = "12+ runners (4 places)"
+
+    if fbkt not in ev_stats:
+        ev_stats[fbkt] = {"n":0,"win_ev":0.0,"plc_ev":0.0,"p1_plc":0}
+    s = ev_stats[fbkt]
+    s["n"]      += 1
+    s["win_ev"] += win_ev
+    s["plc_ev"] += plc_ev
+    if p1_plc: s["p1_plc"] += 1
+
+print(f"  {'Field band':<22} {'N':>5} {'PlcRate%':>9} {'AvgWinEV':>10} {'AvgPlcEV':>10} {'PlcBetter?':>11}")
+print(f"  {'-'*68}")
+for fbkt in ["5-7 runners (2 places)","8-11 runners (3 places)","12+ runners (4 places)"]:
+    s = ev_stats.get(fbkt)
+    if not s or s["n"] == 0:
+        continue
+    avg_win = s["win_ev"] / s["n"]
+    avg_plc = s["plc_ev"] / s["n"]
+    plc_rate = s["p1_plc"] / s["n"] * 100
+    better = "YES" if avg_plc > avg_win else "no"
+    print(f"  {fbkt:<22} {s['n']:>5} {plc_rate:>8.1f}% {avg_win:>10.3f} {avg_plc:>10.3f} {better:>11}")
+print()
+print(f"  Note: EV per £1 staked. Positive = profitable long-run, negative = losing.")
+print(f"  Place EV uses estimated Betfair place odds from win BSP and standard divisors.")
+print()
