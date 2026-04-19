@@ -675,15 +675,12 @@ def _live_bet_job(race: dict, state: dict):
         send(f"⚠️ 📍 Place bet error for {race_label}: {e}")
 
     t = threading.Thread(
-        target = _paper_settle,
-        args   = (race, paper_bets, state),
-        kwargs = {
-            "place_bets": place_bets if not silent else None,
-            "silent":     silent,
-        },
-        daemon = True,
-        name   = f"PaperSettle_{race.get('race_id', '')}",
-    ),
+        target = settle_race,
+        args   = (
+            placement_ts, race.get("race_id", ""), race_label,
+            str(race.get("off_dt", "")), balance_before, balance_after,
+            settle_bets, state,
+        ),
         kwargs = {
             "race":        race,
             "places":      _race_places(race),
