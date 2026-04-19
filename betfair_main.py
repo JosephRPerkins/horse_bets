@@ -213,6 +213,7 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     race_id     = race.get("race_id", "")
     std_places  = _race_places(race)
     cons_places = _race_cons_places(race)
+    # Note: these will be overridden by result runner count after result fetched
 
     off_dt_str = race.get("off_dt", "")
     try:
@@ -247,6 +248,14 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
         if not silent:
             send(f"⚠️ <b>PAPER SETTLE</b> - {race_label}\nResult not available after polling.")
         return
+
+    # Recalculate place terms from actual result runners
+    from predict import place_terms as _place_terms
+    result_runners = [r for r in result.get("runners", []) if r.get("horse")]
+    n_result = len(result_runners) or len(result.get("runners", []))
+    if n_result > 0:
+        std_places  = _place_terms(n_result)
+        cons_places = min(std_places + 1, max(n_result - 1, 1))
 
     # ── Win bet settlement ────────────────────────────────────────────────────
     total_pnl   = 0.0
@@ -357,28 +366,30 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
         except Exception as e:
             logger.error(f"streak_tracker failed for {race_label}: {e}")
 
-    # ── Tier tracker ─────────────────────────────────────────────────────────
-    try:
-        from utils.tier_tracker import log_result
-        tier     = race.get("tier")
-        tsr_solo = race.get("tsr_solo", False)
-        if tier is not None and len(bet_results) >= 1:
-            win1 = bet_results[0][1] if len(bet_results) > 0 else False
-            win2 = bet_results[1][1] if len(bet_results) > 1 else False
-            log_result(
-                race_id  = f"paper_{race_id}",
-                tier     = tier,
-                course   = race.get("course", "?"),
-                off      = race.get("off", "?"),
-                pick1    = paper_bets[0]["horse"] if paper_bets else "?",
-                pick2    = paper_bets[1]["horse"] if len(paper_bets) > 1 else "?",
-                win1     = win1,
-                win2     = win2,
-                places   = std_places,
-                tsr_solo = tsr_solo,
-            )
-    except Exception as e:
-        logger.error(f"tier_tracker paper log failed for {race_label}: {e}")
+                    
+    # ── Tier tracker — paper mode only ───────────────────────────────────────
+    if not silent:
+        try:
+            from utils.tier_tracker import log_result
+            tier     = race.get("tier")
+            tsr_solo = race.get("tsr_solo", False)
+            if tier is not None and len(bet_results) >= 1:
+                win1 = bet_results[0][1] if len(bet_results) > 0 else False
+                win2 = bet_results[1][1] if len(bet_results) > 1 else False
+                log_result(
+                    race_id  = f"paper_{race_id}",
+                    tier     = tier,
+                    course   = race.get("course", "?"),
+                    off      = race.get("off", "?"),
+                    pick1    = paper_bets[0]["horse"] if paper_bets else "?",
+                    pick2    = paper_bets[1]["horse"] if len(paper_bets) > 1 else "?",
+                    win1     = win1,
+                    win2     = win2,
+                    places   = std_places,
+                    tsr_solo = tsr_solo,
+                )
+        except Exception as e:
+            logger.error(f"tier_tracker paper log failed for {race_label}: {e}")
 
     # ── Update state ──────────────────────────────────────────────────────────
     if not silent:
@@ -398,11 +409,13 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     })
     save(state)
 
-    # ── Circuit breaker check ─────────────────────────────────────────────────
-    from betfair.state import check_circuit_breaker
-    circuit_alert = check_circuit_breaker(state)
-    if circuit_alert:
-        send(circuit_alert)  # always send — circuit breaker fires regardless of mode
+    # ── Circuit breaker check — paper mode only ───────────────────────────────
+    # In live mode, circuit breaker is handled by settlement.py using real balance
+    if not silent:
+        from betfair.state import check_circuit_breaker
+        circuit_alert = check_circuit_breaker(state)
+        if circuit_alert:
+            send(circuit_alert)
 
     if silent:
         logger.info(
