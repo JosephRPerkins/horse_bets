@@ -575,7 +575,8 @@ def _live_bet_job(race: dict, state: dict):
     def _try_back(sel_id, horse, stake, label, live_price, liq):
         if stake == 0 or sel_id is None:
             return None
-        if not live_price or live_price < MIN_BACK_PRICE:
+        min_price = 1.2 if tsr else MIN_BACK_PRICE
+        if not live_price or live_price < min_price:
             lines.append(f"⚠️ {label}: {horse} - no viable price ({live_price})")
             return None
         bet = place_back(market_id, sel_id, live_price, stake)
@@ -819,7 +820,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     def _log_win(horse, stake, price, liq, label):
         if stake == 0:
             return
-        if price and price > 1:
+        if price and price > (1.2 if tsr else 1.0):
             lines.append(
                 f"📝 {label}: {horse} @ {price:.2f} - paper £{stake:.2f}"
                 + (f" (liq: £{liq:.0f})" if mkt_ok and liq else "")
