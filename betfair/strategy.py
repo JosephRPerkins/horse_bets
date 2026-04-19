@@ -131,6 +131,9 @@ def _is_attrition_risk(race: dict) -> bool:
 def qualifies(race: dict) -> bool:
     surface = race.get("surface", "")
     going   = (race.get("going") or "").lower()
+    tier    = race.get("tier")
+    cls     = str(race.get("class") or "").strip()
+
     if surface in SKIP_SURFACES:
         return False
     if any(k in going for k in SKIP_GOING_KEYS):
@@ -139,6 +142,18 @@ def qualifies(race: dict) -> bool:
         return False
     if not race.get("top1") or not race.get("top2"):
         return False
+
+    # ── SKIP tier sub-filters ─────────────────────────────────────────────────
+    # Class 2 SKIP races perform well (24W/4L) — keep betting
+    # Class 1 SKIP races are too volatile (22W/11L) — skip
+    # AW low score and large field SKIP — skip
+    if tier == TIER_SKIP:
+        if cls == "Class 1":
+            return False
+        n = len(race.get("all_runners") or race.get("runners") or [])
+        if n >= 13:
+            return False
+
     return True
 
 
