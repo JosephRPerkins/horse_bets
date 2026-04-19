@@ -64,9 +64,8 @@ TIER1_CAP_TIERS = {TIER_GOOD, TIER_SKIP}
 # Format: (min_profit, per_horse_stake, redirect_single_stake)
 STAKE_TIERS = [
     (0,    2,   4),
-    (50,   4,   8),
-    (100,  6,   12),
-    (200,  8,   16),
+    (75,   4,   8),
+    (150,  6,   12),
 ]
 
 STOP_FLOOR = 0.0
