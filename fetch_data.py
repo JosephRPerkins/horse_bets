@@ -15,12 +15,15 @@ Strategy to minimise API calls:
   - Collect all unique horse/trainer/jockey IDs across ALL days + today's card
   - Fetch enrichment data in one upfront pass with caching
   - Apply cached data to all runners — no repeated calls
+  - Skip dates that already have data unless --force is passed
 
 Usage:
-    python fetch_data.py                   # 30 days + today's card
-    python fetch_data.py --days 7          # 7 days + today's card
-    python fetch_data.py --no-cards        # skip today's card
-    python fetch_data.py --refetch-recent  # re-pull last 5 days (ratings fill in over time)
+    python fetch_data.py                          # 30 days + today's card
+    python fetch_data.py --days 7                 # 7 days + today's card
+    python fetch_data.py --no-cards               # skip today's card
+    python fetch_data.py --date 2026-04-15        # fetch a specific date only
+    python fetch_data.py --refetch-recent         # re-pull last 3 days (skip existing by default)
+    python fetch_data.py --refetch-recent --force # re-pull last 3 days even if already fetched
     python fetch_data.py --refetch-recent --refetch-days 7  # re-pull last 7 days
 """
 
@@ -36,15 +39,15 @@ from requests.auth import HTTPBasicAuth
 import config
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
-os.makedirs(config.DIR_RAW, exist_ok=True)
+os.makedirs(config.DIR_RAW,   exist_ok=True)
 os.makedirs(config.DIR_CARDS, exist_ok=True)
 
 auth    = HTTPBasicAuth(config.RACING_API_USERNAME, config.RACING_API_PASSWORD)
 session = requests.Session()
 session.auth = auth
 
-SLEEP          = 0.6   # seconds between API calls — stays under 2 req/sec
-FORM_LIMIT     = 10    # last N races to pull per horse
+SLEEP      = 0.6   # seconds between API calls — stays under 2 req/sec
+FORM_LIMIT = 10    # last N races to pull per horse
 
 # ── Caches ────────────────────────────────────────────────────────────────────
 horse_cache   = {}   # horse_id   → list of past result races
@@ -140,11 +143,8 @@ def fetch_cards_for_date(card_date: str) -> list:
     # Normalise runner fields to match results shape
     for race in all_cards:
         for runner in race.get("runners") or []:
-            # Map racecard field names → results field names
             runner.setdefault("or",  runner.get("ofr", ""))
             runner.setdefault("tsr", runner.get("ts",  ""))
-            # trainer_14_days from the card (runs/wins/percent) — keep as-is
-            # our enrichment will add pl/ae on top
 
     return all_cards
 
@@ -180,9 +180,7 @@ def prefetch_horse_form(horse_ids: set):
     for i, horse_id in enumerate(needed, 1):
         data = api_get(f"racecards/{horse_id}/results", {"limit": FORM_LIMIT})
         time.sleep(SLEEP)
-
         horse_cache[horse_id] = data.get("results", []) if data else []
-
         if i % 50 == 0:
             print(f"    {i}/{len(needed)} horses done...")
 
@@ -270,8 +268,8 @@ def prefetch_jockey_stats(jockey_ids: set, end_date: str):
 # ── Step 4: Derive form summary from cached horse history ─────────────────────
 
 def derive_form(horse_id: str) -> dict:
-    races     = horse_cache.get(horse_id, [])
-    positions = []
+    races        = horse_cache.get(horse_id, [])
+    positions    = []
     going_record = {}
 
     for race in races:
@@ -370,16 +368,38 @@ def ratings_coverage(races: list) -> float:
     return rated / total if total else 0.0
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Skip check ────────────────────────────────────────────────────────────────
 
-def _run_fetch(dates: list[str], today_str: str, fetch_cards: bool) -> dict:
+def already_fetched(race_date: str) -> bool:
+    """Return True if a non-empty results file exists for this date."""
+    path = os.path.join(config.DIR_RAW, f"{race_date}.json")
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return len(data.get("results", [])) > 0
+    except Exception:
+        return False
+
+
+# ── Core fetch logic ──────────────────────────────────────────────────────────
+
+def _run_fetch(dates: list, today_str: str, fetch_cards: bool,
+               force: bool = False) -> dict:
     """
     Core fetch + enrich logic. Returns dict of {date: enriched_races}.
-    Separated so --refetch-recent can call it without re-parsing args.
+
+    dates:       list of YYYY-MM-DD strings to fetch
+    fetch_cards: whether to fetch today's racecards
+    force:       if False, skip dates that already have data
     """
     # Phase 1: results
     all_days = {}
     for race_date in dates:
+        if not force and already_fetched(race_date):
+            print(f"  {race_date} — already fetched, skipping")
+            continue
         print(f"  {race_date}")
         races = fetch_results_for_date(race_date)
         if races:
@@ -403,6 +423,7 @@ def _run_fetch(dates: list[str], today_str: str, fetch_cards: bool) -> dict:
             print(f"  — no races found for today")
 
     if not all_days and not today_cards:
+        print("  Nothing new to fetch.")
         return {}
 
     # Phase 2: unique IDs
@@ -415,7 +436,6 @@ def _run_fetch(dates: list[str], today_str: str, fetch_cards: bool) -> dict:
     horse_ids, trainer_ids, jockey_ids = collect_ids(combined)
     print(f"  {len(horse_ids)} horses | {len(trainer_ids)} trainers | {len(jockey_ids)} jockeys")
 
-    end_date    = today_str
     total_calls = len(horse_ids) + len(trainer_ids) + len(jockey_ids)
     est_mins    = round(total_calls * SLEEP / 60, 1)
     print(f"  ~{total_calls} API calls needed (~{est_mins} min)")
@@ -424,8 +444,8 @@ def _run_fetch(dates: list[str], today_str: str, fetch_cards: bool) -> dict:
     print()
     print("Prefetching enrichment data...")
     prefetch_horse_form(horse_ids)
-    prefetch_trainer_stats(trainer_ids, end_date)
-    prefetch_jockey_stats(jockey_ids, end_date)
+    prefetch_trainer_stats(trainer_ids, today_str)
+    prefetch_jockey_stats(jockey_ids, today_str)
 
     # Phase 4: save results
     print()
@@ -445,32 +465,52 @@ def _run_fetch(dates: list[str], today_str: str, fetch_cards: bool) -> dict:
     return all_days
 
 
+# ── Main ──────────────────────────────────────────────────────────────────────
+
 def main():
     parser = argparse.ArgumentParser(description="Fetch racing data")
-    parser.add_argument("--days",          type=int, default=30,
+    parser.add_argument("--days",           type=int, default=30,
                         help="Days of historical results to fetch (default: 30)")
-    parser.add_argument("--no-cards",      action="store_true",
+    parser.add_argument("--no-cards",       action="store_true",
                         help="Skip fetching today's racecards")
+    parser.add_argument("--date",           type=str, default=None,
+                        help="Fetch a specific date only (YYYY-MM-DD)")
     parser.add_argument("--refetch-recent", action="store_true",
                         help="Re-fetch recent days to pick up ratings published after initial fetch")
-    parser.add_argument("--refetch-days",  type=int, default=5,
-                        help="How many recent days to re-fetch (default: 5, used with --refetch-recent)")
-    args  = parser.parse_args()
-    today = date.today()
+    parser.add_argument("--refetch-days",   type=int, default=3,
+                        help="How many recent days to re-fetch (default: 3, used with --refetch-recent)")
+    parser.add_argument("--force",          action="store_true",
+                        help="Re-fetch even if data already exists (overrides skip-existing behaviour)")
+    args      = parser.parse_args()
+    today     = date.today()
     today_str = today.strftime("%Y-%m-%d")
 
+    # ── Single date fetch ─────────────────────────────────────────────────────
+    if args.date:
+        if not args.force and already_fetched(args.date):
+            print(f"  {args.date} already fetched. Use --force to re-fetch.")
+            return
+        print(f"Racing Data Fetch — SINGLE DATE: {args.date}")
+        print()
+        print("Phase 1: Fetching results...")
+        _run_fetch([args.date], today_str, fetch_cards=False, force=True)
+        print()
+        print("Done.")
+        return
+
+    # ── Refetch recent ────────────────────────────────────────────────────────
     if args.refetch_recent:
-        # Re-pull the N most recent completed days to pick up delayed ratings
         refetch_dates = [
             (today - timedelta(days=i)).strftime("%Y-%m-%d")
             for i in range(1, args.refetch_days + 1)
         ]
         print(f"Racing Data Fetch — REFETCH RECENT ({args.refetch_days} days)")
         print(f"  Dates: {refetch_dates[-1]} → {refetch_dates[0]}")
-        print(f"  Ratings are published with a delay — re-fetching to capture them.")
+        if not args.force:
+            print(f"  Skipping dates already fetched (use --force to override)")
         print()
 
-        # Show current coverage before refetch
+        # Show current coverage
         print("Current ratings coverage:")
         for d in sorted(refetch_dates):
             path = os.path.join(config.DIR_RAW, f"{d}.json")
@@ -483,8 +523,9 @@ def main():
                 print(f"  {d}: not yet fetched")
         print()
 
-        print("Phase 1: Re-fetching results...")
-        _run_fetch(sorted(refetch_dates), today_str, fetch_cards=False)
+        print("Phase 1: Fetching results...")
+        _run_fetch(sorted(refetch_dates), today_str,
+                   fetch_cards=False, force=args.force)
 
         print()
         print("Updated ratings coverage:")
@@ -499,7 +540,7 @@ def main():
         print("Done. Re-run predict_v2.py to see updated predictions.")
         return
 
-    # Normal full fetch
+    # ── Normal full fetch ─────────────────────────────────────────────────────
     dates = [
         (today - timedelta(days=i)).strftime("%Y-%m-%d")
         for i in range(args.days, 0, -1)
@@ -508,13 +549,17 @@ def main():
     print(f"Racing Data Fetch")
     print(f"  Historical: {args.days} days  ({dates[0]} → {dates[-1]})")
     print(f"  Today's card: {'yes' if not args.no_cards else 'no'} ({today_str})")
+    if not args.force:
+        print(f"  Skipping dates already fetched (use --force to override)")
     print()
 
     print("Phase 1: Fetching historical results...")
-    all_days = _run_fetch(dates, today_str, fetch_cards=not args.no_cards)
+    all_days = _run_fetch(dates, today_str,
+                          fetch_cards=not args.no_cards,
+                          force=args.force)
 
     if not all_days:
-        print("No data found. Exiting.")
+        print("No new data found.")
         return
 
     print()
