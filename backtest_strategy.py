@@ -185,13 +185,7 @@ def simulate_race(analysis: dict, balance: float, include_place: bool = True):
         stake_b = 0
         redirect = False
     elif sp_b is None or sp_b < MIN_PICK2_PRICE:
-        # Check solo P1 — back P1 only if it qualifies
-        if sp_a and sp_a >= MIN_PICK1_PRICE:
-            stake_a  = base
-            stake_b  = 0
-            redirect = False
-        else:
-            return None, None, 0, 0, "PRICE_SKIP", f"Pick2 {sp_b} < {MIN_PICK2_PRICE}"
+        return None, None, 0, 0, "PRICE_SKIP", f"Pick2 {sp_b} < {MIN_PICK2_PRICE}"
     elif sp_a is None or sp_a < MIN_PICK1_PRICE:
         # Odds-on redirect
         stake_a  = 0
