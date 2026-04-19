@@ -155,7 +155,7 @@ def race_confidence(race, win_score):
     # tiers are unreliable. Cap at STANDARD with a clear warning.
     blind_note = f"⚠ ratings only {cov:.0%} — SP-based only"
 
-# ── SKIP conditions ───────────────────────────────────────────────────────
+    # ── SKIP conditions ───────────────────────────────────────────────────────
     if cls_12:
         return TIER_SKIP, ["Class 1/2 — highly competitive, model unreliable"]
     if n >= 13 and not is_jump:
@@ -164,9 +164,11 @@ def race_confidence(race, win_score):
         return TIER_SKIP, ["AW + low score — historically weakest category"]
 
     # ── SUPREME ───────────────────────────────────────────────────────────────
-    # TSR solo is a direct value comparison — valid even when coverage is low,
-    # as long as the runners that DO have TSR/OR are the signal bearers.
-    if tsr_solo:
+    # TSR solo trigger — tightened to match backtest conditions:
+    # Turf only (AW excluded), field ≤10, score ≥6.
+    # Original backtest: TSR solo + Turf = 93% (43 races), Chase/Hurdle = 94% (34 races).
+    # Bare tsr_solo on AW or large fields showed no edge in live data.
+    if tsr_solo and not is_aw and n <= 10 and win_score >= 6:
         reasons.append("TSR solo trigger (93% win rate)")
         if is_turf:
             reasons.append("Turf surface ✓")
