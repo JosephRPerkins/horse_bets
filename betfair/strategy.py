@@ -9,14 +9,13 @@ Winnings-driven staking:
   At zero or negative profit stakes stay at £2/horse.
 
 Odds-on handling by tier:
-  SUPREME  — back Pick 1 at any price regardless of Pick 2 price
+  SUPREME  — back Pick 1 at elevated stake, Pick 2 at base if meets minimum price
   STRONG   — skip race entirely if Pick 1 is odds-on
   GOOD     — redirect to Pick 2 ONLY if score >= 5 AND price >= 4.0
   STANDARD — same as GOOD
 
 Pick 2 price gate:
-  MIN_PICK2_PRICE applies to all tiers EXCEPT SUPREME.
-  For SUPREME, Pick 1 is always backed even if Pick 2 is below minimum.
+  MIN_PICK2_PRICE applies to all tiers including SUPREME.
   For non-SUPREME races, if Pick 2 is below minimum but Pick 1 qualifies,
   Pick 1 is backed solo (stake_pick2 = 0) rather than skipping entirely.
 
@@ -246,15 +245,12 @@ def pick_stakes(profit: float, tsr: bool,
         return -1.0, -1.0
 
     # ── SUPREME ───────────────────────────────────────────────────────────────
-    # Always back Pick 1. If Pick 1 is very short (<1.5), skip Pick 2 win bet
-    # — market has already decided this is a near-certainty for Pick 1.
-    # Place bets on both still fire regardless.
+    # Back both picks. P1 gets elevated TSR stake (one tier above base).
+    # P2 backed at base if it meets minimum price — same as STRONG/GOOD.
+    # Backtest: TSR solo + Turf = 93% win rate, AnyPlace% 81% — P2 adds value.
     if tier == TIER_SUPREME:
         s1 = get_tsr_stake(profit) if tier not in TIER1_CAP_TIERS else base
-        if pick1_price is not None and pick1_price < 1.5:
-            s2 = 0.0  # Pick 1 too short — don't back Pick 2 to win
-        else:
-            s2 = base if p2_ok else 0.0
+        s2 = base if p2_ok else 0.0
         return s1, s2
 
     # ── STRONG odds-on P1: skip entirely ─────────────────────────────────────
