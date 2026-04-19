@@ -905,11 +905,11 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     t = threading.Thread(
         target = _paper_settle,
         args   = (race, paper_bets, state),
-        kwargs = {"place_bets": place_bets if not silent else None},
+        kwargs = {"place_bets": place_bets if not silent else None,
+                  "silent": silent},
         daemon = True,
         name   = f"PaperSettle_{race.get('race_id', '')}",
     )
-    t.start()
 
 
 # ── Unified bet job ───────────────────────────────────────────────────────────
