@@ -38,16 +38,11 @@ MIN_PICK1_PRICE = 2.0
 MIN_PICK2_PRICE = 4.0
 TIER1_STAKE     = 2
 
+TIER1_STAKE     = 2
 STAKE_TIERS = [
     (0,    2),
-    (20,   4),
-    (40,   8),
-    (80,   16),
-    (160,  32),
-    (320,  64),
-    (640,  128),
-    (1280, 256),
-    (2560, 512),
+    (75,   4),
+    (150,  6),
 ]
 
 ATTRITION_VENUES = {"fairyhouse", "cork", "punchestown", "naas", "leopardstown"}
@@ -56,6 +51,7 @@ ATTRITION_DIST_F = 20.0
 
 
 def get_stake(balance: float) -> int:
+    """Return per-horse stake based on current balance. Max £6/horse."""
     stake = 2
     for min_bal, s in STAKE_TIERS:
         if balance >= min_bal:
