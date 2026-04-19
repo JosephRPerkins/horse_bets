@@ -199,7 +199,7 @@ def _get_finish_pos(result: dict, horse_name: str):
 # ── Paper settlement ──────────────────────────────────────────────────────────
 
 def _paper_settle(race: dict, paper_bets: list, state: dict,
-                  place_bets: list = None):
+                  place_bets: list = None, silent: bool = False):
     """
     Daemon thread — waits T+15 mins, polls Racing API for result,
     calculates win and place P&L separately, updates cumulative profit
@@ -207,6 +207,7 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
 
     paper_bets:  win market bets  [{horse, price, stake, label}]
     place_bets:  place market bets [{horse, price, stake, cons_places}] or None
+    silent:      if True, suppresses all Telegram output (used in live mode)
     """
     race_label  = f"{race.get('off','?')} {race.get('course','?')}"
     race_id     = race.get("race_id", "")
@@ -243,7 +244,8 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
 
     if not result:
         logger.warning(f"Paper settle {race_label}: no result found after polling")
-        send(f"⚠️ <b>PAPER SETTLE</b> - {race_label}\nResult not available after polling.")
+        if not silent:
+            send(f"⚠️ <b>PAPER SETTLE</b> - {race_label}\nResult not available after polling.")
         return
 
     # ── Win bet settlement ────────────────────────────────────────────────────
@@ -279,9 +281,9 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
         bet_results.append((bet, won))
 
     # ── Place bet settlement ──────────────────────────────────────────────────
-    place_pnl        = 0.0
-    std_win          = False
-    cons_win         = False
+    place_pnl     = 0.0
+    std_win       = False
+    cons_win      = False
 
     if place_bets:
         lines.append("------------------------------")
@@ -317,46 +319,43 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
             state.get("paper_place_pnl", 0.0) + place_pnl, 2
         )
 
-    # ── Combined P&L for cumulative tracking ─────────────────────────────────
-    # Cumulative profit includes BOTH win and place P&L so tier scaling
-    # correctly reflects total money made, not just win bets.
+    # ── Combined P&L ─────────────────────────────────────────────────────────
     combined_pnl = total_pnl + place_pnl
 
     # ── Streak tracker ────────────────────────────────────────────────────────
-    # Uses real Betfair place prices. Falls back to win SP if unavailable.
-    # Sends via send() — betfair.notify — NOT send_results (results bot).
-    try:
-        from notifications.streak_tracker import (
-            update_from_betfair, update as streak_update_sp
-        )
-        outcome    = {"std_win": std_win, "cons_win": cons_win}
-        streak_msg = None
-
-        if place_bets and len(place_bets) >= 2:
-            from betfair.strategy import get_place_stake
-            streak_msg = update_from_betfair(
-                race          = race,
-                outcome       = outcome,
-                horse_a_name  = place_bets[0]["horse"],
-                horse_b_name  = place_bets[1]["horse"],
-                place_price_a = place_bets[0]["price"],
-                place_price_b = place_bets[1]["price"],
-                std_places    = std_places,
-                cons_places   = cons_places,
-                initial_stake = get_place_stake(state.get("cumulative_profit", 0.0)),
+    # Only fire in paper mode — live mode has its own streak handling
+    if not silent:
+        try:
+            from notifications.streak_tracker import (
+                update_from_betfair, update as streak_update_sp
             )
-        elif len(paper_bets) >= 2:
-            # Fallback: estimate from win prices
-            horse_a = {"horse": paper_bets[0]["horse"], "sp_dec": paper_bets[0]["price"]}
-            horse_b = {"horse": paper_bets[1]["horse"], "sp_dec": paper_bets[1]["price"]}
-            race_wp = {**race, "places": std_places, "cons_places": cons_places}
-            streak_msg = streak_update_sp(race_wp, outcome,
-                                          horse_a=horse_a, horse_b=horse_b)
-        if streak_msg:
-            send(streak_msg)
+            outcome    = {"std_win": std_win, "cons_win": cons_win}
+            streak_msg = None
 
-    except Exception as e:
-        logger.error(f"streak_tracker failed for {race_label}: {e}")
+            if place_bets and len(place_bets) >= 2:
+                from betfair.strategy import get_place_stake
+                streak_msg = update_from_betfair(
+                    race          = race,
+                    outcome       = outcome,
+                    horse_a_name  = place_bets[0]["horse"],
+                    horse_b_name  = place_bets[1]["horse"],
+                    place_price_a = place_bets[0]["price"],
+                    place_price_b = place_bets[1]["price"],
+                    std_places    = std_places,
+                    cons_places   = cons_places,
+                    initial_stake = get_place_stake(state.get("cumulative_profit", 0.0)),
+                )
+            elif len(paper_bets) >= 2:
+                horse_a = {"horse": paper_bets[0]["horse"], "sp_dec": paper_bets[0]["price"]}
+                horse_b = {"horse": paper_bets[1]["horse"], "sp_dec": paper_bets[1]["price"]}
+                race_wp = {**race, "places": std_places, "cons_places": cons_places}
+                streak_msg = streak_update_sp(race_wp, outcome,
+                                              horse_a=horse_a, horse_b=horse_b)
+            if streak_msg:
+                send(streak_msg)
+
+        except Exception as e:
+            logger.error(f"streak_tracker failed for {race_label}: {e}")
 
     # ── Tier tracker ─────────────────────────────────────────────────────────
     try:
@@ -381,12 +380,12 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     except Exception as e:
         logger.error(f"tier_tracker paper log failed for {race_label}: {e}")
 
-    # ── Update state and notify ───────────────────────────────────────────────
-    # Cumulative profit updated with combined win + place P&L
+    # ── Update state ──────────────────────────────────────────────────────────
     milestone_alerts = update_cumulative_profit(state, combined_pnl)
-    for alert in milestone_alerts:
-        send(alert)
-                    
+    if not silent:
+        for alert in milestone_alerts:
+            send(alert)
+
     if total_pnl + place_pnl < 0:
         icon = "❌"
     elif total_pnl + place_pnl == 0:
@@ -403,8 +402,17 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     from betfair.state import check_circuit_breaker
     circuit_alert = check_circuit_breaker(state)
     if circuit_alert:
-        send(circuit_alert)
-      
+        send(circuit_alert)  # always send — circuit breaker fires regardless of mode
+
+    if silent:
+        logger.info(
+            f"Paper settle (silent) {race_label}: "
+            f"win {'+' if total_pnl>=0 else ''}£{total_pnl:.2f} "
+            f"place {'+' if place_pnl>=0 else ''}£{place_pnl:.2f}"
+        )
+        return
+
+    # ── Build and send Telegram notification (paper mode only) ───────────────
     cum_profit     = state.get("cumulative_profit", 0.0)
     day_place_pnl  = state.get("paper_place_pnl", 0.0)
     sign           = "+" if total_pnl >= 0 else ""
@@ -430,7 +438,8 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     send(f"{icon} " + "\n".join(lines)[2:])
     logger.info(
         f"Paper settled {race_label}: win {sign}£{total_pnl:.2f} "
-        f"place {place_sign}£{place_pnl:.2f} combined {comb_sign}£{combined_pnl:.2f} "
+        f"place {place_sign}£{place_pnl:.2f} combined "
+        f"{'+' if combined_pnl>=0 else ''}£{combined_pnl:.2f} "
         f"| cumulative £{cum_profit:.2f}"
     )
 
@@ -659,12 +668,15 @@ def _live_bet_job(race: dict, state: dict):
         send(f"⚠️ 📍 Place bet error for {race_label}: {e}")
 
     t = threading.Thread(
-        target = settle_race,
-        args   = (
-            placement_ts, race.get("race_id", ""), race_label,
-            str(race.get("off_dt", "")), balance_before, balance_after,
-            settle_bets, state,
-        ),
+        target = _paper_settle,
+        args   = (race, paper_bets, state),
+        kwargs = {
+            "place_bets": place_bets if not silent else None,
+            "silent":     silent,
+        },
+        daemon = True,
+        name   = f"PaperSettle_{race.get('race_id', '')}",
+    ),
         kwargs = {
             "race":        race,
             "places":      _race_places(race),
