@@ -238,12 +238,17 @@ def pick_stakes(profit: float, tsr: bool,
     if (tier in {TIER_GOOD, TIER_STRONG, TIER_SUPREME}
             and is_two_horse_race(pick1_price, pick2_price, pick3_price)):
         return -1.0, -1.0
-              
+
     # ── SUPREME ───────────────────────────────────────────────────────────────
-    # Always back Pick 1 at any price. Pick 2 only if price viable.
+    # Always back Pick 1. If Pick 1 is very short (<1.5), skip Pick 2 win bet
+    # — market has already decided this is a near-certainty for Pick 1.
+    # Place bets on both still fire regardless.
     if tier == TIER_SUPREME:
         s1 = get_tsr_stake(profit) if tier not in TIER1_CAP_TIERS else base
-        s2 = base if p2_ok else 0.0
+        if pick1_price is not None and pick1_price < 1.5:
+            s2 = 0.0  # Pick 1 too short — don't back Pick 2 to win
+        else:
+            s2 = base if p2_ok else 0.0
         return s1, s2
 
     # ── STRONG odds-on P1: skip entirely ─────────────────────────────────────
