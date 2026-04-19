@@ -9,17 +9,20 @@ determine finishing position.
 
 Handles both win and place bets:
   - Win bets: pays out if horse finishes 1st
-  - Place bets: pays out if horse finishes within cons_places
+  - Place bets: pays out if horse finishes within place terms derived from
+    the ACTUAL number of runners in the result (not the pre-race card size)
 
 Cumulative profit is updated with combined win + place P&L so tier scaling
 reflects total money made. Streak tracker is called after each settlement.
 
 Each race runs in its own daemon thread — no race blocks another.
+
+Key fix: place terms are calculated from result runner count, not card field
+size. Non-runners reduce the field and therefore the place terms on Betfair.
 """
 
 import logging
 import time
-import threading
 import requests
 from datetime import datetime, timezone, timedelta
 
@@ -64,6 +67,26 @@ def _get_finish_pos(result: dict, horse_name: str) -> int | None:
             except (TypeError, ValueError):
                 return None
     return None
+
+
+def _result_place_terms(result: dict) -> tuple[int, int]:
+    """
+    Calculate standard and conservative place terms from the ACTUAL
+    number of runners in the result (after non-runners removed).
+    This matches what Betfair uses for place market settlement.
+
+    Returns (std_places, cons_places)
+    """
+    from predict import place_terms
+    runners = result.get("runners") or []
+    # Count only runners with a valid finishing position or that ran
+    # (exclude pre-race non-runners who won't appear in result)
+    n = len([r for r in runners if r.get("horse")])
+    if n == 0:
+        n = len(runners)
+    std  = place_terms(n) if n > 0 else 1
+    cons = min(std + 1, max(n - 1, 1))
+    return std, cons
 
 
 def _log_to_tier_tracker(race_id, race_label, race, bets, results, places):
@@ -118,9 +141,9 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
 
     bets:        win market bets [{horse, price, stake, ...}]
     place_bets:  place market bets [{horse, price, stake, cons_places}] or None
-    cons_places: conservative place terms (standard + 1) — used if not in bet dict
+    cons_places: conservative place terms fallback (if result unavailable)
     race:        full race metadata dict for tier tracker
-    places:      standard place terms for tier tracker context
+    places:      standard place terms fallback (if result unavailable)
     """
     logger.info(f"Settlement thread started: {race_label}")
 
@@ -156,6 +179,15 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
         _settle_fallback(race_label, bets, place_bets, state)
         return
 
+    # ── Place terms from ACTUAL result runners ────────────────────────────────
+    # Critical: use result runner count not pre-race card size.
+    # Non-runners reduce the field and Betfair adjusts place terms accordingly.
+    result_std_places, result_cons_places = _result_place_terms(result)
+    logger.info(
+        f"{race_label}: result runners={len(result.get('runners', []))} "
+        f"std_places={result_std_places} cons_places={result_cons_places}"
+    )
+
     # ── Win bet settlement ────────────────────────────────────────────────────
     win_pnl = 0.0
     results = []
@@ -181,38 +213,40 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
     win_pnl = round(win_pnl, 2)
 
     # ── Place bet settlement ──────────────────────────────────────────────────
-    place_pnl    = 0.0
+    place_pnl     = 0.0
     place_results = []
-    std_win      = False
-    cons_win     = False
+    std_win       = False
+    cons_win      = False
 
     if place_bets:
-        std_places_n  = places
-        picks_std     = []
-        picks_cons    = []
+        picks_std  = []
+        picks_cons = []
 
         for bet in place_bets:
             horse    = bet.get("horse", "?")
             price    = bet.get("price", 1.0)
             stake    = bet.get("stake", 0.0)
-            c_places = bet.get("cons_places") or cons_places or (places + 1)
+            # Use result-derived cons_places, not pre-race estimate
+            c_places = result_cons_places
             pos      = _get_finish_pos(result, horse)
 
             if pos is not None and pos <= c_places:
                 profit = round(stake * (price - 1) * (1 - COMMISSION), 2)
                 place_pnl += profit
                 picks_cons.append(True)
-                place_results.append((bet, True, profit, f"PLACED top {c_places} (+£{profit:.2f})"))
+                place_results.append((bet, True, profit,
+                                      f"PLACED top {c_places} (+£{profit:.2f})"))
             else:
                 place_pnl -= stake
                 picks_cons.append(False)
                 pos_s = f"{pos}th" if pos else "NR/inc"
-                place_results.append((bet, False, -stake, f"UNPLACED {pos_s} (-£{stake:.2f})"))
+                place_results.append((bet, False, -stake,
+                                      f"UNPLACED {pos_s} (-£{stake:.2f})"))
 
-            picks_std.append(pos is not None and pos <= std_places_n)
+            picks_std.append(pos is not None and pos <= result_std_places)
 
-        std_win  = len(picks_std)  >= 2 and all(picks_std[:2])
-        cons_win = len(picks_cons) >= 2 and all(picks_cons[:2])
+        std_win   = len(picks_std)  >= 2 and all(picks_std[:2])
+        cons_win  = len(picks_cons) >= 2 and all(picks_cons[:2])
         place_pnl = round(place_pnl, 2)
 
     # ── Combined P&L ─────────────────────────────────────────────────────────
@@ -220,7 +254,8 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
 
     # ── Tier tracker ─────────────────────────────────────────────────────────
     if race is not None:
-        _log_to_tier_tracker(race_id, race_label, race, bets, results, places)
+        _log_to_tier_tracker(race_id, race_label, race, bets, results,
+                             result_std_places)
 
     # ── Update state ──────────────────────────────────────────────────────────
     state["daily_pnl"] = round(state.get("daily_pnl", 0.0) + win_pnl, 2)
@@ -239,12 +274,31 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
         send(alert)
     save(state)
 
-    # ── Circuit breaker check ─────────────────────────────────────────────────
-    from betfair.state import check_circuit_breaker
-    circuit_alert = check_circuit_breaker(state)
-    if circuit_alert:
-        send(circuit_alert)
-                  
+    # ── Circuit breaker — read REAL Betfair balance ───────────────────────────
+    # Update day_start_pot-relative tracking using real balance, not
+    # cumulative_profit which may be contaminated by paper settlement.
+    try:
+        real_balance = get_balance()
+        day_start    = state.get("day_start_pot", 0.0)
+        # Inject real balance into profit_history for circuit breaker
+        history = state.get("profit_history", [])
+        history.append(round(real_balance, 2))
+        if len(history) > 10:
+            history = history[-10:]
+        state["profit_history"] = history
+        save(state)
+
+        from betfair.state import check_circuit_breaker
+        # Temporarily set cumulative_profit to real balance for CB check
+        saved_profit = state.get("cumulative_profit", 0.0)
+        state["cumulative_profit"] = real_balance
+        circuit_alert = check_circuit_breaker(state)
+        state["cumulative_profit"] = saved_profit
+        if circuit_alert:
+            send(circuit_alert)
+    except Exception as e:
+        logger.error(f"Circuit breaker check failed: {e}")
+
     cum_profit = state.get("cumulative_profit", 0.0)
 
     # ── Streak tracker ────────────────────────────────────────────────────────
@@ -263,15 +317,18 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
                 horse_b_name  = place_bets[1]["horse"],
                 place_price_a = place_bets[0]["price"],
                 place_price_b = place_bets[1]["price"],
-                std_places    = places,
-                cons_places   = cons_places or (places + 1),
+                std_places    = result_std_places,
+                cons_places   = result_cons_places,
                 initial_stake = i_stake,
             )
         elif len(bets) >= 2:
             horse_a = {"horse": bets[0]["horse"], "sp_dec": bets[0]["price"]}
             horse_b = {"horse": bets[1]["horse"], "sp_dec": bets[1]["price"]}
-            race_wp = {**(race or {}), "places": places, "cons_places": cons_places or (places + 1)}
-            streak_msg = streak_sp(race_wp, outcome, horse_a=horse_a, horse_b=horse_b)
+            race_wp = {**(race or {}),
+                       "places":      result_std_places,
+                       "cons_places": result_cons_places}
+            streak_msg = streak_sp(race_wp, outcome,
+                                   horse_a=horse_a, horse_b=horse_b)
         if streak_msg:
             send(streak_msg)
     except Exception as e:
@@ -284,21 +341,18 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
         "------------------------------",
     ]
 
-    # Win bets
     for bet, won, pnl, detail in results:
         b_icon = "✅" if won else "❌"
         label  = bet.get("label", "")
         lines.append(f"{b_icon} {label} {bet['horse']} @ {bet['price']} — {detail}")
 
-    # Place bets
     if place_results:
         lines.append("------------------------------")
-        lines.append("📍 <b>Place bets</b>")
+        lines.append(f"📍 <b>Place bets</b> (top {result_std_places} std / top {result_cons_places} cons)")
         for bet, won, pnl, detail in place_results:
             b_icon = "✅" if won else "❌"
             lines.append(f"{b_icon} 📍 {bet['horse']} @ {bet['price']:.2f} — {detail}")
 
-    # P&L summary
     current_balance = get_balance()
     bal_diff        = round(current_balance - balance_before, 2)
     bal_sign        = "+" if bal_diff >= 0 else ""
@@ -313,7 +367,10 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
     if place_bets:
         lines.append(f"Place P&L:       {place_sign}£{place_pnl:.2f}")
         lines.append(f"Race Combined:   {comb_sign}£{combined_pnl:.2f}")
-    lines.append(f"Balance:         £{balance_before:.2f} → £{current_balance:.2f} ({bal_sign}£{bal_diff:.2f})")
+    lines.append(
+        f"Balance:         £{balance_before:.2f} → £{current_balance:.2f} "
+        f"({bal_sign}£{bal_diff:.2f})"
+    )
     lines.append(f"Day Win P&L:     {day_sign}£{state['daily_pnl']:.2f}")
     lines.append(f"Cumulative P&L:  {cum_sign}£{cum_profit:.2f}")
     lines.append(f"Next tier at:    £{_next_tier_threshold(cum_profit):.0f} profit")
@@ -334,11 +391,18 @@ def _settle_fallback(race_label: str, bets: list,
         "Racing API result not available. Outcome unknown.",
     ]
     for bet in bets:
-        lines.append(f"  • {bet['horse']} @ {bet['price']} — £{bet['stake']:.2f} win stake")
+        lines.append(
+            f"  • {bet['horse']} @ {bet['price']} — £{bet['stake']:.2f} win stake"
+        )
     if place_bets:
         for bet in place_bets:
-            lines.append(f"  • {bet['horse']} @ {bet['price']:.2f} — £{bet['stake']:.2f} place stake")
+            lines.append(
+                f"  • {bet['horse']} @ {bet['price']:.2f} — £{bet['stake']:.2f} place stake"
+            )
     lines.append("------------------------------")
     lines.append("Check Betfair account manually and update P&L if needed.")
     send("\n".join(lines))
-    logger.error(f"Settlement fallback for {race_label} — {len(bets)} win + {len(place_bets or [])} place bets unresolved")
+    logger.error(
+        f"Settlement fallback for {race_label} — "
+        f"{len(bets)} win + {len(place_bets or [])} place bets unresolved"
+    )
