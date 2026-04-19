@@ -192,7 +192,7 @@ def is_two_horse_race(pick1_price, pick2_price, pick3_price) -> bool:
     scenario1 = (
         pick1_price < MIN_PICK1_PRICE
         and pick2_price < MIN_PICK2_PRICE
-        and pick3_price >= pick2_price * 3.0
+        and pick3_price >= pick2_price * 2.5
     )
     # Scenario 2: P1 very heavily odds-on, P2 viable, P3 well behind
     scenario2 = (
