@@ -98,8 +98,7 @@ def midnight_job():
             # Analyse races through the full pipeline
             norm_racecards = []
             for race in racecards:
-                from api.racing_api import RacingAPIClient as RC
-                norm_runners = [RC.normalise_runner(r)
+                norm_runners = [RacingAPIClient.normalise_runner(r)
                                 for r in race.get("runners", [])]
                 norm_racecards.append({**race, "runners": norm_runners})
 
