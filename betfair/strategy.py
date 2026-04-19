@@ -44,7 +44,7 @@ ATTRITION_GOING  = {"soft", "yielding to soft", "soft to heavy", "heavy"}
 ATTRITION_DIST_F = 20.0
 
 MIN_PICK1_PRICE = 2.0
-MIN_PICK2_PRICE = 4.0   # applies to non-SUPREME tiers only
+MIN_PICK2_PRICE = 2.0   # applies to non-SUPREME tiers only
 
 MIN_PICK2_SCORE_FOR_REDIRECT = 5
 MIN_PICK2_PRICE_FOR_REDIRECT = 4.0
@@ -165,17 +165,23 @@ def should_back_pick1(pick1_price, tier: int = TIER_STD) -> bool:
     return pick1_price >= MIN_PICK1_PRICE
 
 
-def should_back_pick2(pick2_price, tier: int = TIER_STD) -> bool:
+def should_back_pick2(pick2_price, pick1_price=None, tier: int = TIER_STD) -> bool:
     """
-    Returns True if Pick 2 meets the minimum price gate.
-    SUPREME: gate does not apply — Pick 1 always backed regardless.
-    All other tiers: Pick 2 must be >= MIN_PICK2_PRICE.
+    Returns True if Pick 2 meets the price gate.
+    Dynamic check: Pick 2 must be >= 2.0 AND >= Pick 1 price * 0.4
+    This allows short Pick 2s when Pick 1 is also shorter (relative value).
+    SUPREME: gate does not apply.
     """
     if not pick2_price:
         return False
     if tier == TIER_SUPREME:
         return True
-    return pick2_price >= MIN_PICK2_PRICE
+    if pick2_price < MIN_PICK2_PRICE:
+        return False
+    # Dynamic check: Pick 2 must be at least 40% of Pick 1 price
+    if pick1_price and pick2_price < pick1_price * 0.4:
+        return False
+    return True
 
 def is_two_horse_race(pick1_price, pick2_price, pick3_price) -> bool:
     """
@@ -229,7 +235,7 @@ def pick_stakes(profit: float, tsr: bool,
 
     p1_qualifies = should_back_pick1(pick1_price, tier)
     p1_odds_on   = pick1_price is not None and pick1_price < MIN_PICK1_PRICE
-    p2_ok        = pick2_price is not None and pick2_price >= MIN_PICK2_PRICE
+    p2_ok = should_back_pick2(pick2_price, pick1_price, tier)
 
     # ── Two-horse race: place only ────────────────────────────────────────────
     # When both picks are short but the field drops away sharply,
