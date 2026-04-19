@@ -531,8 +531,15 @@ def _live_bet_job(race: dict, state: dict):
         send(f"🐴 💰 {race_label} — two-horse race, place market only (paper tracking)")
         return
     if stake_a == 0 and stake_b == 0:
-        reason = (f"Pick 2 @ {b_live} below min {MIN_PICK2_PRICE}"
-                  if b_live else "No viable picks")
+        if a_live and a_live < MIN_PICK1_PRICE:
+            reason = (
+                f"Pick 1 {a_name} @ {a_live} odds-on — "
+                f"no viable redirect (P2 score {p2_sc} or price insufficient)"
+            )
+        elif b_live and b_live < MIN_PICK2_PRICE:
+            reason = f"Pick 2 {b_name} @ {b_live} below min {MIN_PICK2_PRICE}"
+        else:
+            reason = f"Pick 1 {a_name} @ {a_live} below min {MIN_PICK1_PRICE} — no viable redirect"
         send(f"⏭️ 💰 <b>SKIP - {race_label}</b>\n{reason}")
         return
 
@@ -763,8 +770,15 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     place_only = (stake_a == -1.0 and stake_b == -1.0)
     if not place_only and stake_a == 0 and stake_b == 0:
         if not silent:
-            reason = (f"Pick 2 {b_name} @ {b_live} below min {MIN_PICK2_PRICE}"
-                      if b_live else f"Pick 2 {b_name} - no price")
+            if a_live and a_live < MIN_PICK1_PRICE:
+                reason = (
+                    f"Pick 1 {a_name} @ {a_live} odds-on — "
+                    f"no viable redirect (P2 score {p2_sc} or price insufficient)"
+                )
+            elif b_live and b_live < MIN_PICK2_PRICE:
+                reason = f"Pick 2 {b_name} @ {b_live} below min {MIN_PICK2_PRICE}"
+            else:
+                reason = f"Pick 1 {a_name} @ {a_live} below min {MIN_PICK1_PRICE} — no viable redirect"
             send(f"⏭️ 📝 <b>PAPER SKIP - {race_label}</b>\n{reason}")
         return
 
