@@ -381,8 +381,8 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
         logger.error(f"tier_tracker paper log failed for {race_label}: {e}")
 
     # ── Update state ──────────────────────────────────────────────────────────
-    milestone_alerts = update_cumulative_profit(state, combined_pnl)
     if not silent:
+        milestone_alerts = update_cumulative_profit(state, combined_pnl)
         for alert in milestone_alerts:
             send(alert)
 
