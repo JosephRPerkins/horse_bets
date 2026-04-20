@@ -354,3 +354,69 @@ def place_back(market_id: str, selection_id: int,
     except Exception as e:
         logger.error(f"place_back error: {e}", exc_info=True)
         return None
+
+def place_bsp(market_id: str, selection_id: int, stake: float) -> dict | None:
+    """
+    Place a BSP (Betfair Starting Price) back bet.
+    No price specified — matched at the official Betfair SP after race start.
+    Used as fallback when exchange liquidity is insufficient for a LIMIT order.
+    Returns bet dict on success, None on failure.
+    bet dict keys: type, selection_id, price, size, bet_id, bsp, pending
+    """
+    try:
+        result = get_client().betting.place_orders(
+            market_id    = market_id,
+            instructions = [{
+                "selectionId": selection_id,
+                "side":        "BACK",
+                "orderType":   "MARKET_ON_CLOSE",
+                "marketOnCloseOrder": {
+                    "liability": stake,
+                },
+            }],
+        )
+        if result and result.status == "SUCCESS":
+            order  = result.place_instruction_reports[0]
+            bet_id = getattr(order, "bet_id", "")
+            logger.info(f"BSP order placed: {bet_id} £{stake} — will match at SP")
+            return {
+                "type":         "BACK",
+                "selection_id": selection_id,
+                "price":        None,
+                "size":         stake,
+                "size_matched": stake,
+                "bet_id":       bet_id,
+                "bsp":          True,
+                "pending":      True,
+            }
+        error   = getattr(result, "error_code", "?")
+        reports = getattr(result, "place_instruction_reports", [])
+        rep_err = [getattr(r, "error_code", "") for r in reports]
+        logger.error(f"BSP failed: {getattr(result,'status','?')} {error} {rep_err}")
+        return None
+    except Exception as e:
+        logger.error(f"place_bsp error: {e}", exc_info=True)
+        return None
+
+
+def get_bsp_matched_price(bet_id: str) -> float | None:
+    """
+    Poll listCurrentOrders to retrieve the BSP matched price for a bet.
+    Call this after race start — BSP orders settle within a few minutes.
+    Returns the matched price as a float, or None if not yet settled.
+    """
+    try:
+        orders = get_client().betting.list_current_orders(
+            bet_ids = [bet_id],
+        )
+        if not orders or not orders.current_orders:
+            return None
+        order = orders.current_orders[0]
+        price = getattr(order, "bsp_liability", None)
+        avg   = getattr(order, "average_price_matched", None)
+        if avg and float(avg) > 1.0:
+            return round(float(avg), 2)
+        return None
+    except Exception as e:
+        logger.error(f"get_bsp_matched_price error: {e}")
+        return None
