@@ -66,6 +66,7 @@ from betfair.strategy    import (
     MIN_LIQUIDITY, MIN_PICK1_PRICE, MIN_PICK2_PRICE, should_back_pick1,
     should_back_pick2, STAKE_TIERS, min_liquidity_for_price,
 )
+from predict_v2 import TIER_SUPREME
 from betfair.state       import load, save, reset_daily, update_cumulative_profit
 from betfair.balance_log import log_bet_placed, start_balance_logger
 from betfair.settlement  import settle_race
