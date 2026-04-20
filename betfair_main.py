@@ -81,7 +81,6 @@ logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 logger    = logging.getLogger("betfair_main")
 CARD_PATH = os.path.join(config.DIR_CARDS, "today.json")
 
-# Minutes before race off to place bets
 BET_BEFORE_MINUTES = 5
 
 
@@ -128,6 +127,13 @@ def _race_cons_places(race: dict) -> int:
 def _pick2_score(race: dict) -> int:
     top2 = race.get("top2") or {}
     return int(top2.get("score", 0) or 0)
+
+
+def _score_gap(race: dict) -> int:
+    """P1 score minus P2 score. Used for market-disagreement redirect logic."""
+    top1 = race.get("top1") or {}
+    top2 = race.get("top2") or {}
+    return int((top1.get("score") or 0) - (top2.get("score") or 0))
 
 
 def _find_fallback_pick(race: dict, exclude_names: list, odds: dict, bf_runners: list):
@@ -213,7 +219,6 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     race_id     = race.get("race_id", "")
     std_places  = _race_places(race)
     cons_places = _race_cons_places(race)
-    # Note: these will be overridden by result runner count after result fetched
 
     off_dt_str = race.get("off_dt", "")
     try:
@@ -249,7 +254,6 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
             send(f"⚠️ <b>PAPER SETTLE</b> - {race_label}\nResult not available after polling.")
         return
 
-    # Recalculate place terms from actual result runners
     from predict import place_terms as _place_terms
     result_runners = [r for r in result.get("runners", []) if r.get("horse")]
     n_result = len(result_runners) or len(result.get("runners", []))
@@ -332,7 +336,6 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     combined_pnl = total_pnl + place_pnl
 
     # ── Streak tracker ────────────────────────────────────────────────────────
-    # Only fire in paper mode — live mode has its own streak handling
     if not silent:
         try:
             from notifications.streak_tracker import (
@@ -366,7 +369,6 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
         except Exception as e:
             logger.error(f"streak_tracker failed for {race_label}: {e}")
 
-                    
     # ── Tier tracker — paper mode only ───────────────────────────────────────
     if not silent:
         try:
@@ -410,7 +412,6 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     save(state)
 
     # ── Circuit breaker check — paper mode only ───────────────────────────────
-    # In live mode, circuit breaker is handled by settlement.py using real balance
     if not silent:
         from betfair.state import check_circuit_breaker
         circuit_alert = check_circuit_breaker(state)
@@ -425,7 +426,7 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
         )
         return
 
-    # ── Build and send Telegram notification (paper mode only) ───────────────
+    # ── Build and send Telegram notification ─────────────────────────────────
     cum_profit     = state.get("cumulative_profit", 0.0)
     day_place_pnl  = state.get("paper_place_pnl", 0.0)
     sign           = "+" if total_pnl >= 0 else ""
@@ -482,13 +483,13 @@ def _live_bet_job(race: dict, state: dict):
     balance    = get_balance()
     profit     = state.get("cumulative_profit", 0.0)
     p2_sc      = _pick2_score(race)
-  
+    gap        = _score_gap(race)
+
     top1   = race.get("top1") or {}
     top2   = race.get("top2") or {}
     a_name = top1.get("horse", "?")
     b_name = top2.get("horse", "?")
 
-    # Get Pick 3 price for two-horse race detection
     all_runners = race.get("all_runners", [])
     pick3_price = None
     for r in all_runners:
@@ -497,7 +498,7 @@ def _live_bet_job(race: dict, state: dict):
         if _norm_horse(name) not in [_norm_horse(a_name), _norm_horse(b_name)]:
             pick3_price = r.get("sp_dec")
             break
-          
+
     prev_stake = state.get("_prev_tier_stake")
     for alert in check_topup_alerts(balance, profit, prev_stake):
         send(alert)
@@ -537,8 +538,10 @@ def _live_bet_job(race: dict, state: dict):
     liq_a  = a_info.get("back_size", 0.0)
     liq_b  = b_info.get("back_size", 0.0)
 
-    stake_a, stake_b = pick_stakes(profit, tsr, a_live, b_live, tier=tier,
-                                   pick2_score=p2_sc, pick3_price=pick3_price)
+    stake_a, stake_b = pick_stakes(
+        profit, tsr, a_live, b_live, tier=tier,
+        pick2_score=p2_sc, pick3_price=pick3_price, score_gap=gap
+    )
     place_only = (stake_a == -1.0 and stake_b == -1.0)
     if place_only:
         send(f"🐴 💰 {race_label} — two-horse race, place market only (paper tracking)")
@@ -574,8 +577,10 @@ def _live_bet_job(race: dict, state: dict):
 
     if redirect:
         lines.append(f"⏭️ Pick 1 odds-on ({a_live}) — £{actual_b:.2f} on Pick 2 only")
-    elif stake_b == 0:
+    elif stake_b == 0 and stake_a > 0:
         lines.append(f"ℹ️ Pick 2 below min price — backing Pick 1 solo")
+    elif stake_a == 0 and stake_b > 0:
+        lines.append(f"⏭️ Weak gap + P2 shorter — £{actual_b:.2f} on Pick 2 only (gap={gap})")
     elif actual_b < stake_b:
         lines.append(
             f"⚠️ Stake reduced £{stake_b:.0f}→£{actual_b:.0f} "
@@ -596,7 +601,7 @@ def _live_bet_job(race: dict, state: dict):
         if bet:
             bet["horse_name"] = horse
             matched = bet.get("size_matched") or stake
-            tag = f"⏳" if bet.get("pending") else "✅"
+            tag = "⏳" if bet.get("pending") else "✅"
             lines.append(f"{tag} {label}: {horse} @ {live_price} £{matched:.2f} (liq: £{liq:.0f})")
             return bet
         lines.append(f"❌ {label}: {horse} - rejected by Betfair")
@@ -706,12 +711,15 @@ def _live_bet_job(race: dict, state: dict):
     )
     t.start()
 
+
 # ── Paper bet job ─────────────────────────────────────────────────────────────
 
 def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     """
     Simulate win and place bets using live Betfair prices.
     Place bets scale with win stake tier. Place prices stored for streak tracker.
+    Liquidity checks applied to both win and place bets so paper results
+    reflect realistic exchange fill conditions.
     """
     off_str    = race.get("off", "?")
     course     = race.get("course", "?")
@@ -722,13 +730,13 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     balance    = get_balance()
     profit     = state.get("cumulative_profit", 0.0)
     p2_sc      = _pick2_score(race)
+    gap        = _score_gap(race)
 
     top1   = race.get("top1") or {}
     top2   = race.get("top2") or {}
     a_name = top1.get("horse", "?")
     b_name = top2.get("horse", "?")
 
-    # Get Pick 3 price for two-horse race detection
     all_runners = race.get("all_runners", [])
     pick3_price = None
     for r in all_runners:
@@ -737,7 +745,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
         if _norm_horse(name) not in [_norm_horse(a_name), _norm_horse(b_name)]:
             pick3_price = r.get("sp_dec")
             break
-          
+
     mkt, odds, bf_runners = _get_market(race)
     mkt_ok   = mkt is not None
     a_sel_id = find_selection_id(a_name, bf_runners) if mkt_ok else None
@@ -776,8 +784,10 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
             return
 
     # ── Stake calculation ─────────────────────────────────────────────────────
-    stake_a, stake_b = pick_stakes(profit, tsr, a_live, b_live, tier=tier,
-                                   pick2_score=p2_sc, pick3_price=pick3_price)
+    stake_a, stake_b = pick_stakes(
+        profit, tsr, a_live, b_live, tier=tier,
+        pick2_score=p2_sc, pick3_price=pick3_price, score_gap=gap
+    )
     place_only = (stake_a == -1.0 and stake_b == -1.0)
     if not place_only and stake_a == 0 and stake_b == 0:
         if not silent:
@@ -822,7 +832,9 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
 
     if redirect:
         lines.append(f"⏭️ Pick 1 odds-on ({a_live}) — £{actual_b:.2f} on Pick 2 only")
-    elif stake_b == 0:
+    elif stake_a == 0 and stake_b > 0 and not redirect:
+        lines.append(f"⏭️ Weak gap + P2 shorter — £{actual_b:.2f} on Pick 2 only (gap={gap})")
+    elif stake_b == 0 and stake_a > 0:
         lines.append(f"ℹ️ Pick 2 below min price — backing Pick 1 solo")
     elif actual_b < stake_b and mkt_ok:
         lines.append(
@@ -841,15 +853,14 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
             paper_bets.append({"horse": horse, "price": price, "stake": stake, "label": label})
         else:
             lines.append(f"⚠️ {label}: {horse} - no usable price")
-      
+
     a_label = "⭐ Pick 1 (TSR)" if tsr else "⭐ Pick 1"
     _log_win(a_name, actual_a, a_live, liq_a, a_label)
     _log_win(b_name, actual_b, b_live, liq_b, "🔵 Pick 2")
 
     if place_only and not paper_bets:
-        # Two-horse race — skip win bets, go straight to place market
         lines.append("🐴 <b>Two-horse race — place bets only</b>")
-      
+
     if not paper_bets and not place_only:
         if not silent:
             lines.append("\nℹ️ No paper bets logged")
@@ -859,6 +870,8 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     # ── Place market bets ─────────────────────────────────────────────────────
     # Place stake scales with tier via get_place_stake().
     # Capped at £2 for GOOD/SKIP tiers.
+    # Liquidity checked — skips horses where exchange cannot fill the bet.
+    # This ensures paper results reflect real-world exchange fill conditions.
     place_bets  = []
     cons_places = _race_cons_places(race)
 
@@ -869,7 +882,10 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                 place_odds_map = get_market_odds(place_mkt.market_id)
                 place_runners  = place_mkt.runners or []
 
-                horses_to_place = [w["horse"] for w in paper_bets] if paper_bets else ([a_name, b_name] if place_only else [])
+                horses_to_place = (
+                    [w["horse"] for w in paper_bets] if paper_bets
+                    else ([a_name, b_name] if place_only else [])
+                )
                 for horse in horses_to_place:
                     sel_id = find_selection_id(horse, place_runners)
                     if sel_id is None:
@@ -878,6 +894,16 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                     p_price = p_info.get("back")
                     p_liq   = p_info.get("back_size", 0.0)
                     if not p_price or p_price < 1.1:
+                        continue
+                    # ── Paper liquidity check ─────────────────────────────────
+                    # Skip if exchange cannot realistically fill the place bet.
+                    # This prevents paper overstating returns on thin markets
+                    # (e.g. long-odds horses at small courses).
+                    if p_liq > 0 and p_liq < MIN_LIQUIDITY:
+                        lines.append(
+                            f"⏭️ 📍 {horse} @ {p_price:.2f} — place liquidity "
+                            f"too low (£{p_liq:.0f}) — skipped in paper"
+                        )
                         continue
                     place_bets.append({
                         "horse":       horse,
@@ -910,6 +936,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
         daemon = True,
         name   = f"PaperSettle_{race.get('race_id', '')}",
     )
+    t.start()
 
 
 # ── Unified bet job ───────────────────────────────────────────────────────────
@@ -1103,9 +1130,10 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             a_price = top1.get("sp_dec")
             b_price = top2.get("sp_dec")
             p2_sc   = _pick2_score(r)
+            gap     = _score_gap(r)
             s_a, s_b = pick_stakes(
                 profit, is_tsr_trigger(r), a_price, b_price,
-                tier=r.get("tier", 0), pick2_score=p2_sc
+                tier=r.get("tier", 0), pick2_score=p2_sc, score_gap=gap
             )
             off_dt  = _parse_off_dt(r)
             bet_at  = (off_dt - timedelta(minutes=BET_BEFORE_MINUTES) + timedelta(hours=1)).strftime("%H:%M") if off_dt else "?"
