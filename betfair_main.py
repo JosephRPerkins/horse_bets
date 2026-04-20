@@ -611,8 +611,8 @@ def _live_bet_job(race: dict, state: dict):
             reason = f"Pick 2 {b_name} @ {b_live} below min {MIN_PICK2_PRICE}"
         else:
             reason = f"Pick 1 {a_name} @ {a_live} below min {MIN_PICK1_PRICE} — no viable redirect"
-        send(f"⏭️ 💰 <b>SKIP - {race_label}</b>\n{reason}")
-        return
+        lines.append(f"⏭️ Win bets skipped — {reason}")
+        # Don't return — fall through to place bets
 
     redirect = stake_a == 0
     actual_a, actual_b, skipped, liq_reason = apply_liquidity(
@@ -934,8 +934,8 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                 reason = f"Pick 2 {b_name} @ {b_live} below min {MIN_PICK2_PRICE}"
             else:
                 reason = f"Pick 1 {a_name} @ {a_live} below min {MIN_PICK1_PRICE} — no viable redirect"
-            send(f"⏭️ 📝 <b>PAPER SKIP - {race_label}</b>\n{reason}")
-        return
+            lines.append(f"⏭️ Win bets skipped — {reason}")
+        # Don't return — fall through to place bets
 
     redirect = stake_a == 0 if not place_only else False
 
@@ -1074,6 +1074,12 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                     if not p_price or p_price < 1.1:
                         lines.append(f"⚠️ 📍 {horse} — no viable place price (back={p_price})")
                         logger.warning(f"Place bet {race_label}: {horse} no price back={p_price} sel={sel_id} keys={list(place_odds_map.keys())[:5]}")
+                        continue
+                    if p_lay_liq == 0 and p_price > 1.1:
+                        lines.append(
+                            f"⏭️ 📍 {horse} @ {p_price:.2f} — no lay liquidity, "
+                            f"would not fill in live mode (payout: £{round(p_stake*(p_price-1),2):.0f})"
+                        )
                         continue
                     if p_liq > 0 and p_liq < MIN_LIQUIDITY:
                         lines.append(
@@ -1304,8 +1310,23 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
         for r in sorted(qualifying, key=lambda x: x.get("off", "99:99")):
             top1    = r.get("top1") or {}
             top2    = r.get("top2") or {}
+            # Re-verify SUPREME gate using all_runners
+            tier = r.get("tier", 0)
+            if tier == TIER_SUPREME:
+                from predict_v2 import race_confidence
+                from predict import score_runner as _score_runner
+                _runners = r.get("all_runners") or []
+                if _runners:
+                    _scored = sorted([{**ru, "score": _score_runner(ru)[0]} for ru in _runners],
+                                     key=lambda x: -x["score"])
+                    _raw2 = {**r, "runners": _scored}
+                    _tier, _ = race_confidence(_raw2, _scored[0]["score"] if _scored else 0)
+                    if _tier != TIER_SUPREME:
+                        tier = _tier
+            tsr_m   = " 🔥" if (is_tsr_trigger(r) and tier == TIER_SUPREME) else ""
             badge   = (r.get("tier_label") or "·").split()[0]
-            tsr_m   = " 🔥" if is_tsr_trigger(r) else ""
+            if tier != r.get("tier", 0):
+                badge = {2: "🔥🔥", 1: "🔥", 0: "·", -1: "✗"}.get(tier, "·")
             a_price = top1.get("sp_dec")
             b_price = top2.get("sp_dec")
             p2_sc   = _pick2_score(r)
