@@ -486,6 +486,8 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     ]
 
     send(f"{icon} " + "\n".join(lines)[2:])
+
+    _clear_pending_settlement(state, race.get("race_id",""))
     logger.info(
         f"Paper settled {race_label}: win {sign}£{total_pnl:.2f} "
         f"place {place_sign}£{place_pnl:.2f} combined "
@@ -505,6 +507,17 @@ def _get_market(race: dict):
         return None, None, None
     return mkt, odds, mkt.runners or []
 
+def _save_pending_settlement(state: dict, race_id: str, payload: dict):
+    pending = state.get("pending_settlements", {})
+    pending[race_id] = payload
+    state["pending_settlements"] = pending
+    save(state)
+
+def _clear_pending_settlement(state: dict, race_id: str):
+    pending = state.get("pending_settlements", {})
+    pending.pop(race_id, None)
+    state["pending_settlements"] = pending
+    save(state)
 
 # ── Live bet job ──────────────────────────────────────────────────────────────
 
@@ -1134,6 +1147,15 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     if not silent:
         send("\n".join(lines))
 
+    _save_pending_settlement(state, race.get("race_id",""), {
+        "race_label":   race_label,
+        "race_off_iso": str(race.get("off_dt","")),
+        "paper_bets":   paper_bets,
+        "place_bets":   place_bets,
+        "race":         race,
+        "ts":           datetime.now().isoformat(),
+    })
+  
     t = threading.Thread(
         target = _paper_settle,
         args   = (race, paper_bets, state),
@@ -1375,7 +1397,23 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             lines.append("No qualifying races today.")
         lines.append("==============================")
         send_chunks("\n".join(lines))
-
+    # ── Re-queue any pending settlements from before restart ──────────────────
+    pending = state.get("pending_settlements", {})
+    if pending:
+        logger.info(f"Re-queuing {len(pending)} pending settlements from before restart")
+        send(f"⚠️ Re-queuing {len(pending)} pending settlements from previous session")
+        for race_id, payload in list(pending.items()):
+            t = threading.Thread(
+                target = _paper_settle,
+                args   = (payload["race"], payload["paper_bets"], state),
+                kwargs = {"place_bets": payload.get("place_bets"),
+                          "silent": False},
+                daemon = True,
+                name   = f"PaperSettle_{race_id}",
+            )
+            t.start()
+            logger.info(f"Re-queued settlement for {payload['race_label']}")
+          
     logger.info(
         f"startup: {scheduled} scheduled, mode={mode}, "
         f"balance=£{bal:.2f}, profit=£{profit:.2f}"
