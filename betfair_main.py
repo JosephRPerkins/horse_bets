@@ -550,7 +550,8 @@ def _live_bet_job(race: dict, state: dict):
                 tier = _tier
                 logger.info(f"{race_label}: SUPREME downgraded to tier {tier} at bet time")
     tsr = is_tsr_trigger(race) and tier == TIER_SUPREME
-
+    lines = []
+  
     top1   = race.get("top1") or {}
     top2   = race.get("top2") or {}
     a_name = top1.get("horse", "?")
@@ -729,7 +730,6 @@ def _live_bet_job(race: dict, state: dict):
         # Don't return — fall through to place bets
         balance_after = get_balance()
         placement_ts  = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-        settle_bets   = []
 
     if bets_placed:
         send("\n".join(lines))
@@ -756,12 +756,25 @@ def _live_bet_job(race: dict, state: dict):
     live_place_bets = []
     p_stake         = get_place_stake(profit, tier)
     cons_places     = _race_cons_places(race)
-
+  
     try:
         place_mkt, _ = find_place_market(race)
+        place_odds_map = {}
+        place_runners  = []
         if place_mkt is not None:
             place_odds_map = get_market_odds(place_mkt.market_id)
             place_runners  = place_mkt.runners or []
+            if not place_odds_map:
+                # Check we have time to retry before race off
+                off_utc = _to_utc(race.get("off_dt",""))
+                now_utc = datetime.now(timezone.utc)
+                mins_to_off = (off_utc - now_utc).total_seconds() / 60 if off_utc else 0
+                if mins_to_off > 3:
+                    logger.info(f"{race_label}: place market empty, retrying in 90s ({mins_to_off:.1f} mins to off)")
+                    time.sleep(90)
+                    place_odds_map = get_market_odds(place_mkt.market_id)
+                if not place_odds_map:
+                    logger.info(f"{race_label}: place market still empty after retry")
             win_note = " — place only" if not bets_placed else ""
             place_lines    = ["------------------------------", f"📍 <b>Place bets{win_note}</b>"]
 
@@ -891,7 +904,8 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                 tier = _tier
                 logger.info(f"{race_label}: SUPREME downgraded to tier {tier} at bet time")
     tsr = is_tsr_trigger(race) and tier == TIER_SUPREME
-
+    lines = []
+  
     top1   = race.get("top1") or {}
     top2   = race.get("top2") or {}
     a_name = top1.get("horse", "?")
@@ -1077,9 +1091,22 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     if not silent:
         try:
             place_mkt, _ = find_place_market(race)
+            place_odds_map = {}
+            place_runners  = []
             if place_mkt is not None:
                 place_odds_map = get_market_odds(place_mkt.market_id)
                 place_runners  = place_mkt.runners or []
+                if not place_odds_map:
+                    # Check we have time to retry before race off
+                    off_utc = _to_utc(race.get("off_dt",""))
+                    now_utc = datetime.now(timezone.utc)
+                    mins_to_off = (off_utc - now_utc).total_seconds() / 60 if off_utc else 0
+                    if mins_to_off > 3:
+                        logger.info(f"{race_label}: place market empty, retrying in 90s ({mins_to_off:.1f} mins to off)")
+                        time.sleep(90)
+                        place_odds_map = get_market_odds(place_mkt.market_id)
+                    if not place_odds_map:
+                        logger.info(f"{race_label}: place market still empty after retry")
 
                 n_runners = len(race.get("all_runners") or [])
                 def _place_ev_ok(horse_price):
@@ -1147,14 +1174,15 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     if not silent:
         send("\n".join(lines))
 
-    _save_pending_settlement(state, race.get("race_id",""), {
-        "race_label":   race_label,
-        "race_off_iso": str(race.get("off_dt","")),
-        "paper_bets":   paper_bets,
-        "place_bets":   place_bets,
-        "race":         race,
-        "ts":           datetime.now().isoformat(),
-    })
+    if not silent:
+        _save_pending_settlement(state, race.get("race_id",""), {
+            "race_label":   race_label,
+            "race_off_iso": str(race.get("off_dt","")),
+            "paper_bets":   paper_bets,
+            "place_bets":   place_bets,
+            "race":         race,
+            "ts":           datetime.now().isoformat(),
+        })
   
     t = threading.Thread(
         target = _paper_settle,
