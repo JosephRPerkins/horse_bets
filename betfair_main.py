@@ -519,6 +519,23 @@ def _live_bet_job(race: dict, state: dict):
     p2_sc      = _pick2_score(race)
     gap        = _score_gap(race)
 
+    # ── Re-verify SUPREME gate at bet time ────────────────────────────────────
+    # Tier is pre-baked into the card at build time. Re-check at bet time
+    # using all_runners so AW/large-field SUPREME races are correctly downgraded.
+    if tier == TIER_SUPREME:
+        from predict_v2 import race_confidence
+        from predict import score_runner as _score_runner
+        _runners = race.get("all_runners") or []
+        if _runners:
+            _scored = sorted([{**r, "score": _score_runner(r)[0]} for r in _runners],
+                             key=lambda x: -x["score"])
+            _raw2 = {**race, "runners": _scored}
+            _tier, _ = race_confidence(_raw2, _scored[0]["score"] if _scored else 0)
+            if _tier != TIER_SUPREME:
+                tier = _tier
+                logger.info(f"{race_label}: SUPREME downgraded to tier {tier} at bet time")
+    tsr = is_tsr_trigger(race) and tier == TIER_SUPREME
+
     top1   = race.get("top1") or {}
     top2   = race.get("top2") or {}
     a_name = top1.get("horse", "?")
@@ -804,6 +821,23 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     profit     = state.get("cumulative_profit", 0.0)
     p2_sc      = _pick2_score(race)
     gap        = _score_gap(race)
+
+    # ── Re-verify SUPREME gate at bet time ────────────────────────────────────
+    # Tier is pre-baked into the card at build time. Re-check at bet time
+    # using all_runners so AW/large-field SUPREME races are correctly downgraded.
+    if tier == TIER_SUPREME:
+        from predict_v2 import race_confidence
+        from predict import score_runner as _score_runner
+        _runners = race.get("all_runners") or []
+        if _runners:
+            _scored = sorted([{**r, "score": _score_runner(r)[0]} for r in _runners],
+                             key=lambda x: -x["score"])
+            _raw2 = {**race, "runners": _scored}
+            _tier, _ = race_confidence(_raw2, _scored[0]["score"] if _scored else 0)
+            if _tier != TIER_SUPREME:
+                tier = _tier
+                logger.info(f"{race_label}: SUPREME downgraded to tier {tier} at bet time")
+    tsr = is_tsr_trigger(race) and tier == TIER_SUPREME
 
     top1   = race.get("top1") or {}
     top2   = race.get("top2") or {}
