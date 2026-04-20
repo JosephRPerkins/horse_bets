@@ -764,24 +764,32 @@ def _live_bet_job(race: dict, state: dict):
                 if sel_id is None:
                     place_lines.append(f"⚠️ 📍 {horse} — not found in place market")
                     continue
-                p_info  = place_odds_map.get(sel_id, {})
-                p_price = p_info.get("back")
+                p_info    = place_odds_map.get(sel_id, {})
+                p_price   = p_info.get("back")
                 p_liq     = p_info.get("back_size", 0.0)
                 p_lay_liq = p_info.get("lay_size", 0.0)
 
                 if not p_price or p_price < 1.1:
                     place_lines.append(f"⚠️ 📍 {horse} — no viable place price")
                     continue
-                if p_liq < MIN_LIQUIDITY:
+
+                min_stake         = 2.0
+                required_for_min  = round(min_stake * (p_price - 1), 2)
+                if p_lay_liq == 0 or p_lay_liq < required_for_min:
                     place_lines.append(
-                        f"⏭️ 📍 {horse} @ {p_price:.2f} — place liquidity too low (£{p_liq:.0f})"
+                        f"⏭️ 📍 {horse} @ {p_price:.2f} — lay liq £{p_lay_liq:.0f} "
+                        f"insufficient (needs £{required_for_min:.0f} for min stake)"
                     )
                     continue
 
-                place_bet = place_back(place_mkt.market_id, sel_id, p_price, p_stake)
+                max_stake_from_liq = p_lay_liq / (p_price - 1)
+                actual_p_stake     = min(p_stake, max_stake_from_liq)
+                actual_p_stake     = max(min_stake, round(actual_p_stake / 2) * 2)
+
+                place_bet = place_back(place_mkt.market_id, sel_id, p_price, actual_p_stake)
                 if place_bet:
                     place_bet["horse_name"] = horse
-                    matched_p = place_bet.get("size_matched") or p_stake
+                    matched_p = place_bet.get("size_matched") or actual_p_stake
                     tag = "⏳" if place_bet.get("pending") else "✅"
                     p_required = round(matched_p * (p_price - 1), 2)
                     p_lay_ok   = "✅" if p_lay_liq >= p_required else "⚠️"
@@ -1073,32 +1081,35 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                         lines.append(f"⚠️ 📍 {horse} — not found in place market")
                         logger.warning(f"Place bet {race_label}: {horse} not found in place runners")
                         continue
-                    p_info  = place_odds_map.get(sel_id, {})
-                    p_price = p_info.get("back")
+                    p_info    = place_odds_map.get(sel_id, {})
+                    p_price   = p_info.get("back")
                     p_liq     = p_info.get("back_size", 0.0)
                     p_lay_liq = p_info.get("lay_size", 0.0)
+
                     if not p_price or p_price < 1.1:
                         lines.append(f"⚠️ 📍 {horse} — no viable place price (back={p_price})")
                         logger.warning(f"Place bet {race_label}: {horse} no price back={p_price} sel={sel_id} keys={list(place_odds_map.keys())[:5]}")
                         continue
-                    if p_lay_liq == 0 and p_price > 1.1:
+
+                    min_stake        = 2.0
+                    required_for_min = round(min_stake * (p_price - 1), 2)
+                    if p_lay_liq == 0 or p_lay_liq < required_for_min:
                         lines.append(
-                            f"⏭️ 📍 {horse} @ {p_price:.2f} — no lay liquidity, "
-                            f"would not fill in live mode (payout: £{round(p_stake*(p_price-1),2):.0f})"
+                            f"⏭️ 📍 {horse} @ {p_price:.2f} — lay liq £{p_lay_liq:.0f} "
+                            f"insufficient (needs £{required_for_min:.0f} for min stake)"
                         )
                         continue
-                    if p_liq > 0 and p_liq < MIN_LIQUIDITY:
-                        lines.append(
-                            f"⏭️ 📍 {horse} @ {p_price:.2f} — place liquidity "
-                            f"too low (£{p_liq:.0f}) — skipped in paper"
-                        )
-                        continue
+
+                    max_stake_from_liq = p_lay_liq / (p_price - 1)
+                    actual_p_stake     = min(p_stake, max_stake_from_liq)
+                    actual_p_stake     = max(min_stake, round(actual_p_stake / 2) * 2)
+
                     place_bets.append({
                         "horse":       horse,
                         "price":       p_price,
-                        "stake":       p_stake,
+                        "stake":       actual_p_stake,
                         "cons_places": cons_places,
-                        "lay_liq": p_lay_liq
+                        "lay_liq":     p_lay_liq,
                     })
 
                 if place_bets:
