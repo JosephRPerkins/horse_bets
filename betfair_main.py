@@ -336,7 +336,7 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     if place_bets:
         win_note = " — place only (no win bets)" if not paper_bets else ""
         lines.append("------------------------------")
-        lines.append(f"📍 <b>Place bets (£{p_stake:.0f} each, top {cons_places}){win_note}</b>")
+        lines.append(f"📍 <b>Place bets (£{place_bets[0]['stake']:.0f} each, top {cons_places}){win_note}</b>")
 
         picks_placed_std  = []
         picks_placed_cons = []
@@ -588,8 +588,10 @@ def _live_bet_job(race: dict, state: dict):
 
     a_live = a_info.get("back")
     b_live = b_info.get("back")
-    liq_a  = a_info.get("back_size", 0.0)
-    liq_b  = b_info.get("back_size", 0.0)
+    liq_a      = a_info.get("back_size", 0.0)
+    liq_b      = b_info.get("back_size", 0.0)
+    lay_liq_a  = a_info.get("lay_size", 0.0)
+    lay_liq_b  = b_info.get("lay_size", 0.0)
 
     stake_a, stake_b = pick_stakes(
         profit, tsr, a_live, b_live, tier=tier,
@@ -665,7 +667,7 @@ def _live_bet_job(race: dict, state: dict):
     bets_placed    = []
     balance_before = balance
 
-    def _try_back(sel_id, horse, stake, label, live_price, liq, use_bsp=False):
+    def _try_back(sel_id, horse, stake, label, live_price, liq, lay_liq=0.0, use_bsp=False):
         if stake == 0 or sel_id is None:
             return None
         if use_bsp:
@@ -674,7 +676,7 @@ def _live_bet_job(race: dict, state: dict):
                 bet["horse_name"] = horse
                 lines.append(
                     f"🔄 {label}: {horse} — BSP £{stake:.2f} "
-                    f"(liq too low: £{liq:.0f})"
+                    f"(back liq: £{liq:.0f} — insufficient for limit order)"
                 )
                 return bet
             lines.append(f"❌ {label}: {horse} - BSP order rejected")
@@ -688,14 +690,19 @@ def _live_bet_job(race: dict, state: dict):
             bet["horse_name"] = horse
             matched = bet.get("size_matched") or stake
             tag = "⏳" if bet.get("pending") else "✅"
-            lines.append(f"{tag} {label}: {horse} @ {live_price} £{matched:.2f} (liq: £{liq:.0f})")
+            required = round(matched * (live_price - 1), 2)
+            lay_ok   = "✅" if lay_liq >= required else "⚠️"
+            lines.append(
+                f"{tag} {label}: {horse} @ {live_price} £{matched:.2f} "
+                f"(back liq: £{liq:.0f} | payout: £{required:.0f} {lay_ok} lay: £{lay_liq:.0f})"
+            )
             return bet
         lines.append(f"❌ {label}: {horse} - rejected by Betfair")
         return None
 
     a_label = "⭐ Pick 1 (TSR)" if tsr else "⭐ Pick 1"
-    bet_a = _try_back(a_sel_id, a_name, actual_a, a_label, a_live, liq_a, use_bsp=use_bsp_a)
-    bet_b = _try_back(b_sel_id, b_name, actual_b, "🔵 Pick 2", b_live, liq_b, use_bsp=use_bsp_b)
+    bet_a = _try_back(a_sel_id, a_name, actual_a, a_label, a_live, liq_a, lay_liq=lay_liq_a, use_bsp=use_bsp_a)
+    bet_b = _try_back(b_sel_id, b_name, actual_b, "🔵 Pick 2", b_live, liq_b, lay_liq=lay_liq_b, use_bsp=use_bsp_b)
 
     if bet_a: bets_placed.append(bet_a)
     if bet_b: bets_placed.append(bet_b)
@@ -756,7 +763,8 @@ def _live_bet_job(race: dict, state: dict):
                     continue
                 p_info  = place_odds_map.get(sel_id, {})
                 p_price = p_info.get("back")
-                p_liq   = p_info.get("back_size", 0.0)
+                p_liq     = p_info.get("back_size", 0.0)
+                p_lay_liq = p_info.get("lay_size", 0.0)
 
                 if not p_price or p_price < 1.1:
                     place_lines.append(f"⚠️ 📍 {horse} — no viable place price")
@@ -772,14 +780,18 @@ def _live_bet_job(race: dict, state: dict):
                     place_bet["horse_name"] = horse
                     matched_p = place_bet.get("size_matched") or p_stake
                     tag = "⏳" if place_bet.get("pending") else "✅"
+                    p_required = round(matched_p * (p_price - 1), 2)
+                    p_lay_ok   = "✅" if p_lay_liq >= p_required else "⚠️"
                     place_lines.append(
-                        f"{tag} 📍 {horse} @ {p_price:.2f} £{matched_p:.2f} (liq: £{p_liq:.0f})"
+                        f"{tag} 📍 {horse} @ {p_price:.2f} £{matched_p:.2f} "
+                        f"(back: £{p_liq:.0f} | payout: £{p_required:.0f} {p_lay_ok} lay: £{p_lay_liq:.0f})"
                     )
                     live_place_bets.append({
                         "horse":       horse,
                         "price":       p_price,
                         "stake":       matched_p or p_stake,
                         "cons_places": cons_places,
+                        "lay_liq":     p_lay_liq,
                     })
                 else:
                     place_lines.append(f"❌ 📍 {horse} @ {p_price:.2f} — rejected by Betfair")
@@ -876,8 +888,10 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
 
     a_live = a_info.get("back") or top1.get("sp_dec")
     b_live = b_info.get("back") or top2.get("sp_dec")
-    liq_a  = a_info.get("back_size", 0.0)
-    liq_b  = b_info.get("back_size", 0.0)
+    liq_a      = a_info.get("back_size", 0.0)
+    liq_b      = b_info.get("back_size", 0.0)
+    lay_liq_a  = a_info.get("lay_size", 0.0)
+    lay_liq_b  = b_info.get("lay_size", 0.0)
 
     # ── Non-runner checks ─────────────────────────────────────────────────────
     if mkt_ok and a_info.get("status") == "REMOVED":
@@ -996,9 +1010,12 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                 "label": label, "bsp": True,
             })
         elif price and price > (1.2 if tsr else 1.0):
+            required = round(stake * (price - 1), 2)
+            lay_liq  = lay_liq_a if horse == a_name else lay_liq_b
+            lay_ok   = "✅" if lay_liq >= required else "⚠️"
             lines.append(
                 f"📝 {label}: {horse} @ {price:.2f} - paper £{stake:.2f}"
-                + (f" (liq: £{liq:.0f})" if mkt_ok and liq else "")
+                + (f" (back: £{liq:.0f} | payout: £{required:.0f} {lay_ok} lay: £{lay_liq:.0f})" if mkt_ok and liq else "")
             )
             paper_bets.append({
                 "horse": horse, "price": price, "stake": stake,
@@ -1050,7 +1067,8 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                         continue
                     p_info  = place_odds_map.get(sel_id, {})
                     p_price = p_info.get("back")
-                    p_liq   = p_info.get("back_size", 0.0)
+                    p_liq     = p_info.get("back_size", 0.0)
+                    p_lay_liq = p_info.get("lay_size", 0.0)
                     if not p_price or p_price < 1.1:
                         continue
                     if p_liq > 0 and p_liq < MIN_LIQUIDITY:
@@ -1064,13 +1082,16 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                         "price":       p_price,
                         "stake":       p_stake,
                         "cons_places": cons_places,
+                        "lay_liq": p_lay_liq
                     })
 
                 if place_bets:
                     lines.append("------------------------------")
                     lines.append(f"📍 <b>Place bets (£{p_stake:.0f} each, top {cons_places})</b>")
                     for pb in place_bets:
-                        lines.append(f"  📍 {pb['horse']} @ {pb['price']:.2f}")
+                        pb_required = round(p_stake * (pb['price'] - 1), 2)
+                        pb_lay_ok   = "✅" if pb.get('lay_liq', 0) >= pb_required else "⚠️"
+                        lines.append(f"  📍 {pb['horse']} @ {pb['price']:.2f} (payout: £{pb_required:.0f} {pb_lay_ok} lay: £{pb.get('lay_liq',0):.0f})")
                 else:
                     lines.append("📍 Place market: no prices available")
             else:
@@ -1295,8 +1316,6 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
                 s_b = s_a
             off_dt  = _parse_off_dt(r)
             bet_at  = (off_dt - timedelta(minutes=BET_BEFORE_MINUTES) + timedelta(hours=1)).strftime("%H:%M") if off_dt else "?"
-            p1_note = " (odds-on→skip)" if (a_price and a_price < MIN_PICK1_PRICE) else ""
-            p2_note = " (solo P1)" if (b_price and b_price is not None and b_price < MIN_PICK2_PRICE) else ""
             p1_note    = " (odds-on→skip)" if (a_price and a_price < MIN_PICK1_PRICE) else ""
             p2_note    = " (solo P1)" if (b_price and b_price is not None and b_price < MIN_PICK2_PRICE) else ""
             place_note = " 📍" if (s_a == 0 and s_b == 0) else ""
