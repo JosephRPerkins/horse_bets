@@ -738,7 +738,17 @@ def _live_bet_job(race: dict, state: dict):
             win_note = " — place only" if not bets_placed else ""
             place_lines    = ["------------------------------", f"📍 <b>Place bets{win_note}</b>"]
 
-            horses_to_place = [h for h in [a_name, b_name] if h and h != "?"]
+            n_runners = len(race.get("all_runners") or [])
+            def _place_ev_ok(horse_price):
+                if not horse_price: return True
+                if horse_price < 2.0: return True   # odds-on: always place
+                if 3.0 <= horse_price < 5.0 and n_runners >= 9: return False
+                if 8.0 <= horse_price < 13.0 and n_runners >= 6: return False
+                return True
+            horses_to_place = [
+                h for h, sp in [(a_name, a_live), (b_name, b_live)]
+                if h and h != "?" and _place_ev_ok(sp)
+            ]
             for horse in horses_to_place:
                 sel_id = find_selection_id(horse, place_runners)
                 if sel_id is None:
@@ -1023,8 +1033,17 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                 place_odds_map = get_market_odds(place_mkt.market_id)
                 place_runners  = place_mkt.runners or []
 
-                # Always consider P1 and P2 for place bets independently of win bets
-                horses_to_place = [h for h in [a_name, b_name] if h and h != "?"]
+                n_runners = len(race.get("all_runners") or [])
+                def _place_ev_ok(horse_price):
+                    if not horse_price: return True
+                    if horse_price < 2.0: return True
+                    if 3.0 <= horse_price < 5.0 and n_runners >= 9: return False
+                    if 8.0 <= horse_price < 13.0 and n_runners >= 6: return False
+                    return True
+                horses_to_place = [
+                    h for h, sp in [(a_name, a_live), (b_name, b_live)]
+                    if h and h != "?" and _place_ev_ok(sp)
+                ]
                 for horse in horses_to_place:
                     sel_id = find_selection_id(horse, place_runners)
                     if sel_id is None:
