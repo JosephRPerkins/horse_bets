@@ -1005,9 +1005,8 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
 
     if not paper_bets and not place_only:
         if not silent:
-            lines.append("\nℹ️ No paper bets logged")
-            send("\n".join(lines))
-        return
+            lines.append("\nℹ️ No win bets — checking place market only")
+        # Don't return — fall through to place bet section
 
     # ── Place market bets ─────────────────────────────────────────────────────
     # Place stake scales with tier via get_place_stake().
