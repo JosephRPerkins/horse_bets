@@ -12,6 +12,12 @@ Handles both win and place bets:
   - Place bets: pays out if horse finishes within place terms derived from
     the ACTUAL number of runners in the result (not the pre-race card size)
 
+BSP bets:
+  - Bets placed as MARKET_ON_CLOSE have price=0 at placement time.
+  - After the race, get_bsp_matched_price() polls listCurrentOrders to
+    retrieve the actual matched BSP price before calculating returns.
+  - Falls back to Racing API sp_dec if Betfair order lookup fails.
+
 Cumulative profit is updated with combined win + place P&L so tier scaling
 reflects total money made. Streak tracker is called after each settlement.
 
@@ -31,7 +37,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
 
-from .api     import get_balance, _norm_horse, COMMISSION
+from .api     import get_balance, get_bsp_matched_price, _norm_horse, COMMISSION
 from .state   import save, update_cumulative_profit
 from .notify  import send
 
@@ -69,6 +75,19 @@ def _get_finish_pos(result: dict, horse_name: str) -> int | None:
     return None
 
 
+def _get_sp_from_result(result: dict, horse_name: str) -> float | None:
+    """Extract Racing API sp_dec for a horse — used as BSP fallback."""
+    norm = _norm_horse(horse_name)
+    for r in result.get("runners", []):
+        bf = _norm_horse(r.get("horse", ""))
+        if norm == bf or norm in bf or bf in norm:
+            try:
+                return float(r.get("sp_dec") or 0) or None
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def _result_place_terms(result: dict) -> tuple[int, int]:
     """
     Calculate standard and conservative place terms from the ACTUAL
@@ -79,8 +98,6 @@ def _result_place_terms(result: dict) -> tuple[int, int]:
     """
     from predict import place_terms
     runners = result.get("runners") or []
-    # Count only runners with a valid finishing position or that ran
-    # (exclude pre-race non-runners who won't appear in result)
     n = len([r for r in runners if r.get("horse")])
     if n == 0:
         n = len(runners)
@@ -139,11 +156,15 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
     """
     Daemon thread per live race.
 
-    bets:        win market bets [{horse, price, stake, ...}]
+    bets:        win market bets [{horse, price, stake, bet_id, bsp, ...}]
     place_bets:  place market bets [{horse, price, stake, cons_places}] or None
     cons_places: conservative place terms fallback (if result unavailable)
     race:        full race metadata dict for tier tracker
     places:      standard place terms fallback (if result unavailable)
+
+    BSP bets have price=0 at placement. After result is fetched, we poll
+    get_bsp_matched_price() for the actual matched price. Falls back to
+    Racing API sp_dec if the Betfair order lookup fails.
     """
     logger.info(f"Settlement thread started: {race_label}")
 
@@ -180,8 +201,6 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
         return
 
     # ── Place terms from ACTUAL result runners ────────────────────────────────
-    # Critical: use result runner count not pre-race card size.
-    # Non-runners reduce the field and Betfair adjusts place terms accordingly.
     result_std_places, result_cons_places = _result_place_terms(result)
     logger.info(
         f"{race_label}: result runners={len(result.get('runners', []))} "
@@ -193,22 +212,40 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
     results = []
 
     for bet in bets:
-        horse = bet.get("horse", "?")
-        price = bet.get("price", 1.0)
-        stake = bet.get("stake", 0.0)
-        pos   = _get_finish_pos(result, horse)
+        horse   = bet.get("horse", "?")
+        stake   = bet.get("stake", 0.0)
+        is_bsp  = bet.get("bsp", False)
+        bet_id  = bet.get("bet_id", "")
+        pos     = _get_finish_pos(result, horse)
+
+        # ── Resolve BSP price ─────────────────────────────────────────────────
+        # BSP bets have price=0 at placement. Poll Betfair for matched price.
+        # Falls back to Racing API sp_dec if lookup fails or returns None.
+        if is_bsp:
+            price = None
+            if bet_id:
+                price = get_bsp_matched_price(bet_id)
+            if not price:
+                price = _get_sp_from_result(result, horse)
+            if not price:
+                price = 2.0  # last resort fallback
+                logger.warning(f"{race_label}: BSP price unavailable for {horse}, using 2.0")
+            else:
+                logger.info(f"{race_label}: BSP {horse} settled @ {price:.2f}")
+        else:
+            price = bet.get("price", 1.0)
 
         if pos == 1:
             profit = round(stake * (price - 1) * (1 - COMMISSION), 2)
             win_pnl += profit
-            results.append((bet, True, profit, f"1st (+£{profit:.2f})"))
+            results.append((bet, True, profit, price, f"1st (+£{profit:.2f})"))
         elif pos is not None:
             win_pnl -= stake
             ordinal = "2nd" if pos==2 else "3rd" if pos==3 else f"{pos}th"
-            results.append((bet, False, -stake, f"{ordinal} (-£{stake:.2f})"))
+            results.append((bet, False, -stake, price, f"{ordinal} (-£{stake:.2f})"))
         else:
             win_pnl -= stake
-            results.append((bet, False, -stake, f"NR/unplaced (-£{stake:.2f})"))
+            results.append((bet, False, -stake, price, f"NR/unplaced (-£{stake:.2f})"))
 
     win_pnl = round(win_pnl, 2)
 
@@ -226,7 +263,6 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
             horse    = bet.get("horse", "?")
             price    = bet.get("price", 1.0)
             stake    = bet.get("stake", 0.0)
-            # Use result-derived cons_places, not pre-race estimate
             c_places = result_cons_places
             pos      = _get_finish_pos(result, horse)
 
@@ -268,19 +304,14 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
             state.get("paper_place_pnl", 0.0) + place_pnl, 2
         )
 
-    # Update cumulative profit with combined win + place
     milestone_alerts = update_cumulative_profit(state, combined_pnl)
     for alert in milestone_alerts:
         send(alert)
     save(state)
 
     # ── Circuit breaker — read REAL Betfair balance ───────────────────────────
-    # Update day_start_pot-relative tracking using real balance, not
-    # cumulative_profit which may be contaminated by paper settlement.
     try:
         real_balance = get_balance()
-        day_start    = state.get("day_start_pot", 0.0)
-        # Inject real balance into profit_history for circuit breaker
         history = state.get("profit_history", [])
         history.append(round(real_balance, 2))
         if len(history) > 10:
@@ -289,7 +320,6 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
         save(state)
 
         from betfair.state import check_circuit_breaker
-        # Temporarily set cumulative_profit to real balance for CB check
         saved_profit = state.get("cumulative_profit", 0.0)
         state["cumulative_profit"] = real_balance
         circuit_alert = check_circuit_breaker(state)
@@ -322,8 +352,11 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
                 initial_stake = i_stake,
             )
         elif len(bets) >= 2:
-            horse_a = {"horse": bets[0]["horse"], "sp_dec": bets[0]["price"]}
-            horse_b = {"horse": bets[1]["horse"], "sp_dec": bets[1]["price"]}
+            # Use resolved price (index 3) from results tuples
+            price_a = results[0][3] if len(results) > 0 else bets[0].get("price", 2.0)
+            price_b = results[1][3] if len(results) > 1 else bets[1].get("price", 2.0)
+            horse_a = {"horse": bets[0]["horse"], "sp_dec": price_a}
+            horse_b = {"horse": bets[1]["horse"], "sp_dec": price_b}
             race_wp = {**(race or {}),
                        "places":      result_std_places,
                        "cons_places": result_cons_places}
@@ -341,14 +374,21 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
         "------------------------------",
     ]
 
-    for bet, won, pnl, detail in results:
+    for bet, won, pnl, price, detail in results:
         b_icon = "✅" if won else "❌"
         label  = bet.get("label", "")
-        lines.append(f"{b_icon} {label} {bet['horse']} @ {bet['price']} — {detail}")
+        is_bsp = bet.get("bsp", False)
+        bsp_tag = " [BSP]" if is_bsp else ""
+        lines.append(
+            f"{b_icon} {label} {bet['horse']} @ {price:.2f}{bsp_tag} — {detail}"
+        )
 
     if place_results:
         lines.append("------------------------------")
-        lines.append(f"📍 <b>Place bets</b> (top {result_std_places} std / top {result_cons_places} cons)")
+        lines.append(
+            f"📍 <b>Place bets</b> (top {result_std_places} std / "
+            f"top {result_cons_places} cons)"
+        )
         for bet, won, pnl, detail in place_results:
             b_icon = "✅" if won else "❌"
             lines.append(f"{b_icon} 📍 {bet['horse']} @ {bet['price']:.2f} — {detail}")
@@ -391,8 +431,12 @@ def _settle_fallback(race_label: str, bets: list,
         "Racing API result not available. Outcome unknown.",
     ]
     for bet in bets:
+        price   = bet.get("price") or 0
+        is_bsp  = bet.get("bsp", False)
+        bsp_tag = " [BSP]" if is_bsp else ""
+        price_s = f"@ {price:.2f}" if price else "@ BSP"
         lines.append(
-            f"  • {bet['horse']} @ {bet['price']} — £{bet['stake']:.2f} win stake"
+            f"  • {bet['horse']} {price_s}{bsp_tag} — £{bet['stake']:.2f} win stake"
         )
     if place_bets:
         for bet in place_bets:
