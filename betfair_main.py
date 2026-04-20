@@ -333,8 +333,9 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     cons_win      = False
 
     if place_bets:
+        win_note = " — place only (no win bets)" if not paper_bets else ""
         lines.append("------------------------------")
-        lines.append("📍 <b>Place bets</b>")
+        lines.append(f"📍 <b>Place bets (£{p_stake:.0f} each, top {cons_places}){win_note}</b>")
 
         picks_placed_std  = []
         picks_placed_cons = []
@@ -733,7 +734,8 @@ def _live_bet_job(race: dict, state: dict):
         if place_mkt is not None:
             place_odds_map = get_market_odds(place_mkt.market_id)
             place_runners  = place_mkt.runners or []
-            place_lines    = ["------------------------------", "📍 <b>Place bets</b>"]
+            win_note = " — place only" if not bets_placed else ""
+            place_lines    = ["------------------------------", f"📍 <b>Place bets{win_note}</b>"]
 
             horses_to_place = [h for h in [a_name, b_name] if h and h != "?"]
             for horse in horses_to_place:
