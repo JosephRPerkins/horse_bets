@@ -111,6 +111,23 @@ def get_tsr_stake(profit: float) -> float:
     except ValueError:
         return current
 
+def min_liquidity_for_price(price: float, stake: float) -> float:
+    """
+    Dynamic minimum liquidity threshold for a bet.
+    Long-odds horses need proportionally more lay-side liquidity to fill.
+    Formula: stake * (price / 5.0) capped at 4x stake, floored at MIN_LIQUIDITY.
+
+    Examples at £2 stake:
+      price 2.0  -> £2.00  (base floor)
+      price 3.0  -> £2.00  (base floor)
+      price 6.0  -> £2.40
+      price 10.0 -> £4.00
+      price 15.0 -> £6.00
+      price 20.0 -> £8.00  (cap)
+      price 50.0 -> £8.00  (cap)
+    """
+    multiplier = min(price / 5.0, 4.0)
+    return max(MIN_LIQUIDITY, round(stake * multiplier, 2))
 
 def is_tsr_trigger(race: dict) -> bool:
     return race.get("tier") == TIER_SUPREME
