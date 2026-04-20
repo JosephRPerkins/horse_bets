@@ -257,14 +257,6 @@ def pick_stakes(profit: float, tsr: bool,
     p1_odds_on   = pick1_price is not None and pick1_price < MIN_PICK1_PRICE
     p2_ok        = should_back_pick2(pick2_price, pick1_price, tier)
 
-    # ── Two-horse race: place only ────────────────────────────────────────────
-    # When both picks are short but the field drops away sharply,
-    # skip win bets but signal place-only via sentinel (-1, -1).
-    # Only fires for GOOD, STRONG, SUPREME — not STANDARD/SKIP.
-    if (tier in {TIER_GOOD, TIER_STRONG, TIER_SUPREME}
-            and is_two_horse_race(pick1_price, pick2_price, pick3_price)):
-        return -1.0, -1.0
-
     # ── SUPREME ───────────────────────────────────────────────────────────────
     # Back both picks. P1 gets elevated TSR stake (one tier above base).
     # P2 backed at base if it meets minimum price — same as STRONG/GOOD.
