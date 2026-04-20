@@ -14,6 +14,11 @@ Odds-on handling by tier:
   GOOD     — redirect to Pick 2 ONLY if score >= 5 AND price >= 4.0
   STANDARD — same as GOOD
 
+Score gap + market agreement:
+  When score gap < 3 AND P2 is priced shorter than P1, P2 is the better bet.
+  Data: 133 races, P2 wins 23.3% vs P1 16.5%. STRONG tier confirms same pattern.
+  In this case all tiers (except SUPREME) redirect to P2 at redirect stake.
+
 Pick 2 price gate:
   MIN_PICK2_PRICE applies to all tiers including SUPREME.
   For non-SUPREME races, if Pick 2 is below minimum but Pick 1 qualifies,
@@ -43,7 +48,7 @@ ATTRITION_GOING  = {"soft", "yielding to soft", "soft to heavy", "heavy"}
 ATTRITION_DIST_F = 20.0
 
 MIN_PICK1_PRICE = 2.0
-MIN_PICK2_PRICE = 2.0   # applies to non-SUPREME tiers only
+MIN_PICK2_PRICE = 2.0
 
 MIN_PICK2_SCORE_FOR_REDIRECT = 5
 MIN_PICK2_PRICE_FOR_REDIRECT = 4.0
@@ -51,15 +56,11 @@ MIN_PICK2_PRICE_FOR_REDIRECT = 4.0
 MIN_BACK_PRICE = 1.5
 MIN_LIQUIDITY  = 2.0
 
-# Topup thresholds are dynamic — calculated in check_topup_alerts()
-# based on current stake tier (3x race cost = warning, 1x = critical)
-
 TIER1_CAP_TIERS = {TIER_GOOD, TIER_SKIP}
 
 # Winnings-driven cascade — thresholds are cumulative PROFIT not total balance.
 # Scaled to account for place bets: total exposure per race ≈ £8 at base tier
 # (£2 win P1 + £2 win P2 + £2 place P1 + £2 place P2).
-# Thresholds raised ~2x vs original to avoid premature tier jumps.
 # Format: (min_profit, per_horse_stake, redirect_single_stake)
 STAKE_TIERS = [
     (0,    2,   4),
@@ -167,7 +168,7 @@ def should_back_pick1(pick1_price, tier: int = TIER_STD) -> bool:
 def should_back_pick2(pick2_price, pick1_price=None, tier: int = TIER_STD) -> bool:
     """
     Returns True if Pick 2 meets the price gate.
-    Dynamic check: Pick 2 must be >= 2.0 AND >= Pick 1 price * 0.4
+    Dynamic check: Pick 2 must be >= 2.0 AND >= Pick 1 price * 0.4.
     This allows short Pick 2s when Pick 1 is also shorter (relative value).
     SUPREME: gate does not apply.
     """
@@ -177,29 +178,27 @@ def should_back_pick2(pick2_price, pick1_price=None, tier: int = TIER_STD) -> bo
         return True
     if pick2_price < MIN_PICK2_PRICE:
         return False
-    # Dynamic check: Pick 2 must be at least 40% of Pick 1 price
     if pick1_price and pick2_price < pick1_price * 0.4:
         return False
     return True
+
 
 def is_two_horse_race(pick1_price, pick2_price, pick3_price) -> bool:
     """
     True when market identifies an effective two-horse race.
     Two scenarios:
-    1. Both picks short (P1 odds-on, P2 < MIN_PICK2_PRICE) and field drops away
-    2. P1 very heavily odds-on (< 1.5) and P3 is at least 3x P2 price
+    1. Both picks short (P1 odds-on, P2 < MIN_PICK2_PRICE) and field drops away.
+    2. P1 very heavily odds-on (< 1.5) and P3 is at least 2x P2 price
        — catches cases where P2 is viable but P1 is so short the race
-       is effectively between just two horses
+       is effectively between just two horses.
     """
     if not pick1_price or not pick2_price or not pick3_price:
         return False
-    # Scenario 1: both picks short, field drops away
     scenario1 = (
         pick1_price < MIN_PICK1_PRICE
         and pick2_price < MIN_PICK2_PRICE
         and pick3_price >= pick2_price * 2.5
     )
-    # Scenario 2: P1 very heavily odds-on, P2 viable, P3 well behind
     scenario2 = (
         pick1_price < 1.5
         and pick2_price >= MIN_PICK2_PRICE
@@ -207,20 +206,25 @@ def is_two_horse_race(pick1_price, pick2_price, pick3_price) -> bool:
     )
     return scenario1 or scenario2
 
+
 def pick_stakes(profit: float, tsr: bool,
                 pick1_price, pick2_price,
                 tier: int = TIER_STD,
                 pick2_score: int = 0,
-                pick3_price = None) -> tuple:
+                pick3_price = None,
+                score_gap: int = 0) -> tuple:
     """
     Return (stake_pick1, stake_pick2).
 
-    profit:       cumulative net profit — drives stake tier
-    pick2_score:  model score for Pick 2 — gates redirect decisions
+    profit:      cumulative net profit — drives stake tier
+    pick2_score: model score for Pick 2 — gates existing redirect decisions
+    score_gap:   P1 score minus P2 score — drives market-disagreement redirect
 
     Key behaviours:
-    - SUPREME: always backs Pick 1. Pick 2 backed only if >= MIN_PICK2_PRICE.
+    - SUPREME: back both picks, P1 at elevated TSR stake.
     - STRONG odds-on P1: skip entirely (0, 0)
+    - Weak gap (<3) + P2 shorter than P1: redirect to P2 (all tiers except SUPREME)
+      Data: 133 races, P2 wins 23.3% vs P1 16.5%. STRONG tier: P2 57.1% vs P1 14.3%.
     - GOOD/SKIP: capped at £2/horse
     - Non-SUPREME with P1 qualifying but P2 below min: backs P1 solo (s1, 0)
     - Returns (0, 0) only when race should be skipped completely.
@@ -234,7 +238,7 @@ def pick_stakes(profit: float, tsr: bool,
 
     p1_qualifies = should_back_pick1(pick1_price, tier)
     p1_odds_on   = pick1_price is not None and pick1_price < MIN_PICK1_PRICE
-    p2_ok = should_back_pick2(pick2_price, pick1_price, tier)
+    p2_ok        = should_back_pick2(pick2_price, pick1_price, tier)
 
     # ── Two-horse race: place only ────────────────────────────────────────────
     # When both picks are short but the field drops away sharply,
@@ -256,6 +260,18 @@ def pick_stakes(profit: float, tsr: bool,
     # ── STRONG odds-on P1: skip entirely ─────────────────────────────────────
     if p1_odds_on and tier == TIER_STRONG:
         return 0.0, 0.0
+
+    # ── Weak gap + market disagrees: redirect to P2 ───────────────────────────
+    # When score gap < 3 AND P2 is priced shorter than P1, P2 is the better bet.
+    # Applies to all tiers except SUPREME (handled above).
+    # 133 races: P2 wins 23.3% vs P1 16.5%.
+    # STRONG tier specifically: P2 57.1% vs P1 14.3% in this condition.
+    if (score_gap < 3
+            and pick1_price is not None
+            and pick2_price is not None
+            and pick2_price < pick1_price
+            and p2_ok):
+        return 0.0, redirect
 
     # ── Normal P1 qualifies ───────────────────────────────────────────────────
     # Back P1. Back P2 only if it meets minimum price.
@@ -295,13 +311,11 @@ def apply_liquidity(stake_a: float, stake_b: float,
             return 0.0, 0.0, True, f"Pick 2 liquidity £{liq_b:.2f} < £{MIN_LIQUIDITY:.0f}"
         return 0.0, actual_b, False, ""
     else:
-        # Solo Pick 1 bet (stake_b == 0) — only check P1 liquidity
         if stake_b == 0:
             actual_a = min(stake_a, liq_a) if liq_a > 0 else stake_a
             if actual_a < MIN_LIQUIDITY and liq_a > 0:
                 return 0.0, 0.0, True, f"Pick 1 liquidity £{liq_a:.2f} < £{MIN_LIQUIDITY:.0f}"
             return actual_a, 0.0, False, ""
-        # Both picks
         safe     = min(liq_a, liq_b) if liq_a > 0 and liq_b > 0 else stake_a
         actual_a = min(stake_a, safe)
         actual_b = min(stake_b, liq_b) if liq_b > 0 else stake_b
@@ -319,11 +333,9 @@ def check_topup_alerts(balance: float, profit: float,
     curr_stake = get_stake(profit)
     p_stake    = get_place_stake(profit)
 
-    # Dynamic thresholds based on current tier
-    # One full race = 2 win bets + 2 place bets
     race_cost    = (curr_stake * 2) + (p_stake * 2)
-    warning_bal  = race_cost * 3   # can cover 3 more races
-    critical_bal = race_cost       # can only cover 1 more race
+    warning_bal  = race_cost * 3
+    critical_bal = race_cost
 
     if balance <= 0:
         alerts.append(
