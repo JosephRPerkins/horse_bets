@@ -735,7 +735,7 @@ def _live_bet_job(race: dict, state: dict):
             place_runners  = place_mkt.runners or []
             place_lines    = ["------------------------------", "📍 <b>Place bets</b>"]
 
-            horses_to_place = [b.get("horse_name", "?") for b in bets_placed]
+            horses_to_place = [h for h in [a_name, b_name] if h and h != "?"]
             for horse in horses_to_place:
                 sel_id = find_selection_id(horse, place_runners)
                 if sel_id is None:
@@ -1021,10 +1021,8 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                 place_odds_map = get_market_odds(place_mkt.market_id)
                 place_runners  = place_mkt.runners or []
 
-                horses_to_place = (
-                    [w["horse"] for w in paper_bets] if paper_bets
-                    else ([a_name, b_name] if place_only else [])
-                )
+                # Always consider P1 and P2 for place bets independently of win bets
+                horses_to_place = [h for h in [a_name, b_name] if h and h != "?"]
                 for horse in horses_to_place:
                     sel_id = find_selection_id(horse, place_runners)
                     if sel_id is None:
