@@ -114,7 +114,12 @@ def _races_status() -> str:
         tsr_tag = " 🔥" if tsr else ""
         a_price = top1.get("sp_dec")
         b_price = top2.get("sp_dec")
-        s_a, s_b = pick_stakes(bal, tsr, a_price, b_price, tier=r.get("tier", 0))
+        from betfair.strategy import get_stake
+        from betfair_main import _score_gap
+        gap  = _score_gap(r)
+        prof = state.get("cumulative_profit", bal) if "state" in dir() else bal
+        s_a, s_b = pick_stakes(prof, tsr, a_price, b_price,
+                               tier=r.get("tier", 0), score_gap=gap)
         p1_note  = " ⚠️odds-on" if (a_price and a_price < MIN_PICK1_PRICE) else ""
         p2_warn  = " ⚠️under 3/1" if (b_price and b_price < MIN_PICK2_PRICE) else ""
         place_note = " 📍place only" if (s_a == 0 and s_b == 0) else ""
