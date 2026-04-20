@@ -117,10 +117,11 @@ def _races_status() -> str:
         s_a, s_b = pick_stakes(bal, tsr, a_price, b_price, tier=r.get("tier", 0))
         p1_note  = " ⚠️odds-on" if (a_price and a_price < MIN_PICK1_PRICE) else ""
         p2_warn  = " ⚠️under 3/1" if (b_price and b_price < MIN_PICK2_PRICE) else ""
+        place_note = " 📍place only" if (s_a == 0 and s_b == 0) else ""
         lines.append(
             f"{badge} <b>{r.get('off','?')} {r.get('course','?')}</b>{tsr_tag}\n"
             f"  ⭐ {top1.get('horse','?')} ({top1.get('sp','?')}){p1_note} £{s_a:.2f} | "
-            f"🔵 {top2.get('horse','?')} ({top2.get('sp','?')}){p2_warn} £{s_b:.2f}"
+            f"🔵 {top2.get('horse','?')} ({top2.get('sp','?')}){p2_warn} £{s_b:.2f}{place_note}"
         )
     return "\n".join(lines)
 
