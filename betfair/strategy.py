@@ -195,7 +195,7 @@ def should_back_pick2(pick2_price, pick1_price=None, tier: int = TIER_STD) -> bo
         return True
     if pick2_price < MIN_PICK2_PRICE:
         return False
-    if pick1_price and pick2_price < pick1_price * 0.4:
+    if pick1_price and pick1_price < 10.0 and pick2_price < pick1_price * 0.4:
         return False
     return True
 
