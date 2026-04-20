@@ -1278,9 +1278,12 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             bet_at  = (off_dt - timedelta(minutes=BET_BEFORE_MINUTES) + timedelta(hours=1)).strftime("%H:%M") if off_dt else "?"
             p1_note = " (odds-on→skip)" if (a_price and a_price < MIN_PICK1_PRICE) else ""
             p2_note = " (solo P1)" if (b_price and b_price is not None and b_price < MIN_PICK2_PRICE) else ""
+            p1_note    = " (odds-on→skip)" if (a_price and a_price < MIN_PICK1_PRICE) else ""
+            p2_note    = " (solo P1)" if (b_price and b_price is not None and b_price < MIN_PICK2_PRICE) else ""
+            place_note = " 📍" if (s_a == 0 and s_b == 0) else ""
             lines.append(
                 f"{badge} <b>{r.get('off','?')} {r.get('course','?')}</b>{tsr_m}"
-                f" [bet@{bet_at}]\n"
+                f" [bet@{bet_at}]{place_note}\n"
                 f"  ⭐ {top1.get('horse','?')} ({top1.get('sp','?')}){p1_note} £{s_a:.2f} | "
                 f"🔵 {top2.get('horse','?')} ({top2.get('sp','?')}){p2_note} £{s_b:.2f}"
             )
