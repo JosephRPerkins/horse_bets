@@ -1064,12 +1064,16 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                 for horse in horses_to_place:
                     sel_id = find_selection_id(horse, place_runners)
                     if sel_id is None:
+                        lines.append(f"⚠️ 📍 {horse} — not found in place market")
+                        logger.warning(f"Place bet {race_label}: {horse} not found in place runners")
                         continue
                     p_info  = place_odds_map.get(sel_id, {})
                     p_price = p_info.get("back")
                     p_liq     = p_info.get("back_size", 0.0)
                     p_lay_liq = p_info.get("lay_size", 0.0)
                     if not p_price or p_price < 1.1:
+                        lines.append(f"⚠️ 📍 {horse} — no viable place price (back={p_price})")
+                        logger.warning(f"Place bet {race_label}: {horse} no price back={p_price} sel={sel_id} keys={list(place_odds_map.keys())[:5]}")
                         continue
                     if p_liq > 0 and p_liq < MIN_LIQUIDITY:
                         lines.append(
