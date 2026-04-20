@@ -81,7 +81,7 @@ Stops below £5\
 """
 
 
-def _races_status() -> str:
+def _races_status(state: dict = None) -> str:
     if not os.path.exists(CARD_PATH):
         return "⚠️ today.json not found — main bot may not have run yet."
     try:
@@ -114,12 +114,14 @@ def _races_status() -> str:
         tsr_tag = " 🔥" if tsr else ""
         a_price = top1.get("sp_dec")
         b_price = top2.get("sp_dec")
-        from betfair.strategy import get_stake
-        from betfair_main import _score_gap
-        gap  = _score_gap(r)
-        prof = state.get("cumulative_profit", bal) if "state" in dir() else bal
-        s_a, s_b = pick_stakes(prof, tsr, a_price, b_price,
-                               tier=r.get("tier", 0), score_gap=gap)
+        profit = (state or {}).get("cumulative_profit", bal)
+        top1_s = top1.get("score") or 0
+        top2_s = top2.get("score") or 0
+        gap    = int(top1_s - top2_s)
+        p2_sc  = int((r.get("top2") or {}).get("score", 0) or 0)
+        s_a, s_b = pick_stakes(profit, tsr, a_price, b_price,
+                               tier=r.get("tier", 0),
+                               pick2_score=p2_sc, score_gap=gap)
         p1_note  = " ⚠️odds-on" if (a_price and a_price < MIN_PICK1_PRICE) else ""
         p2_warn  = " ⚠️under 3/1" if (b_price and b_price < MIN_PICK2_PRICE) else ""
         place_note = " 📍place only" if (s_a == 0 and s_b == 0) else ""
@@ -359,7 +361,7 @@ def handle_command(cmd: str, state: dict) -> None:
         send("\n".join(lines))
 
     elif cmd == "/races":
-        send_chunks(_races_status())
+        send_chunks(_races_status(state))
 
     elif cmd == "/help":
         send(HELP_TEXT)
