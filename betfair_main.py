@@ -22,6 +22,12 @@ Place bets (paper only):
   Settled on conservative place terms (standard + 1).
   Tracked separately in Telegram output.
 
+BSP fallback:
+  When exchange liquidity is below the dynamic threshold for a horse's price,
+  the bot falls back to a MARKET_ON_CLOSE (BSP) order rather than skipping.
+  In paper mode, the Racing API SP is used as the BSP proxy at settlement.
+  This ensures long-odds winners at thin markets are not missed.
+
 Streak tracker:
   Uses actual Betfair place market prices captured at bet time.
   Tracks both standard and conservative compounding streaks.
@@ -51,14 +57,14 @@ from apscheduler.triggers.cron         import CronTrigger
 import config
 from betfair.api         import (
     get_client, get_balance, find_win_market, find_place_market,
-    get_market_odds, find_selection_id, place_back,
-    _to_utc, _to_local_naive, COMMISSION,
+    get_market_odds, find_selection_id, place_back, place_bsp,
+    get_bsp_matched_price, _to_utc, _to_local_naive, COMMISSION,
 )
 from betfair.strategy    import (
     qualifies, is_tsr_trigger, get_stake, get_place_stake, pick_stakes,
     apply_liquidity, check_topup_alerts, stake_display, MIN_BACK_PRICE,
     MIN_LIQUIDITY, MIN_PICK1_PRICE, MIN_PICK2_PRICE, should_back_pick1,
-    should_back_pick2, STAKE_TIERS,
+    should_back_pick2, STAKE_TIERS, min_liquidity_for_price,
 )
 from betfair.state       import load, save, reset_daily, update_cumulative_profit
 from betfair.balance_log import log_bet_placed, start_balance_logger
@@ -202,6 +208,20 @@ def _get_finish_pos(result: dict, horse_name: str):
     return None
 
 
+def _get_sp_from_result(result: dict, horse_name: str):
+    """Extract the SP (sp_dec) for a horse from the Racing API result."""
+    from betfair.api import _norm_horse
+    norm = _norm_horse(horse_name)
+    for r in result.get("runners", []):
+        bf = _norm_horse(r.get("horse", ""))
+        if norm == bf or norm in bf or bf in norm:
+            try:
+                return float(r.get("sp_dec") or 0) or None
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 # ── Paper settlement ──────────────────────────────────────────────────────────
 
 def _paper_settle(race: dict, paper_bets: list, state: dict,
@@ -211,9 +231,12 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     calculates win and place P&L separately, updates cumulative profit
     from BOTH win and place combined, fires streak tracker.
 
-    paper_bets:  win market bets  [{horse, price, stake, label}]
+    paper_bets:  win market bets  [{horse, price, stake, label, bsp}]
     place_bets:  place market bets [{horse, price, stake, cons_places}] or None
     silent:      if True, suppresses all Telegram output (used in live mode)
+
+    BSP bets: if bet has bsp=True, price is None at placement time.
+    After result is fetched, the Racing API SP is used as the settlement price.
     """
     race_label  = f"{race.get('off','?')} {race.get('course','?')}"
     race_id     = race.get("race_id", "")
@@ -271,26 +294,37 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     ]
 
     for bet in paper_bets:
-        horse = bet["horse"]
-        price = bet["price"]
-        stake = bet["stake"]
-        label = bet.get("label", "")
-        pos   = _get_finish_pos(result, horse)
+        horse   = bet["horse"]
+        stake   = bet["stake"]
+        label   = bet.get("label", "")
+        is_bsp  = bet.get("bsp", False)
+        pos     = _get_finish_pos(result, horse)
+
+        # For BSP bets use Racing API SP as settlement price
+        if is_bsp:
+            price = _get_sp_from_result(result, horse)
+            if price:
+                lines.append(f"🔄 {label} {horse} — BSP settled @ {price:.2f}")
+            else:
+                price = bet.get("price") or 2.0
+                lines.append(f"⚠️ {label} {horse} — BSP price unavailable, using {price:.2f}")
+        else:
+            price = bet["price"]
 
         if pos == 1:
             profit = round(stake * (price - 1) * (1 - COMMISSION), 2)
             total_pnl += profit
             won = True
-            lines.append(f"✅ {label} {horse} @ {price} - WON 1st (+£{profit:.2f})")
+            lines.append(f"✅ {label} {horse} @ {price:.2f} - WON 1st (+£{profit:.2f})")
         elif pos is not None:
             total_pnl -= stake
             won = False
             ord_s = "nd" if pos==2 else "rd" if pos==3 else "th"
-            lines.append(f"❌ {label} {horse} @ {price} - LOST {pos}{ord_s} (-£{stake:.2f})")
+            lines.append(f"❌ {label} {horse} @ {price:.2f} - LOST {pos}{ord_s} (-£{stake:.2f})")
         else:
             total_pnl -= stake
             won = False
-            lines.append(f"❌ {label} {horse} @ {price} - LOST (NR/inc) (-£{stake:.2f})")
+            lines.append(f"❌ {label} {horse} @ {price:.2f} - LOST (NR/inc) (-£{stake:.2f})")
         bet_results.append((bet, won))
 
     # ── Place bet settlement ──────────────────────────────────────────────────
@@ -358,8 +392,8 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
                     initial_stake = get_place_stake(state.get("cumulative_profit", 0.0)),
                 )
             elif len(paper_bets) >= 2:
-                horse_a = {"horse": paper_bets[0]["horse"], "sp_dec": paper_bets[0]["price"]}
-                horse_b = {"horse": paper_bets[1]["horse"], "sp_dec": paper_bets[1]["price"]}
+                horse_a = {"horse": paper_bets[0]["horse"], "sp_dec": paper_bets[0].get("price")}
+                horse_b = {"horse": paper_bets[1]["horse"], "sp_dec": paper_bets[1].get("price")}
                 race_wp = {**race, "places": std_places, "cons_places": cons_places}
                 streak_msg = streak_update_sp(race_wp, outcome,
                                               horse_a=horse_a, horse_b=horse_b)
@@ -563,6 +597,28 @@ def _live_bet_job(race: dict, state: dict):
     actual_a, actual_b, skipped, liq_reason = apply_liquidity(
         stake_a, stake_b, liq_a if not redirect else 0.0, liq_b, redirect
     )
+
+    # ── BSP fallback — insufficient liquidity ─────────────────────────────────
+    # When liquidity is below the dynamic threshold for a horse's price,
+    # submit a MARKET_ON_CLOSE order instead of skipping.
+    # Only falls back when liq > 0 (market exists but is thin).
+    # If liq = 0, skip entirely — no market interest at all.
+    use_bsp_a = False
+    use_bsp_b = False
+    if skipped and (liq_a > 0 or liq_b > 0):
+        min_liq_a = min_liquidity_for_price(a_live or 0, stake_a) if stake_a > 0 else 0
+        min_liq_b = min_liquidity_for_price(b_live or 0, stake_b) if stake_b > 0 else 0
+        if not redirect:
+            use_bsp_a = stake_a > 0 and liq_a > 0 and liq_a < min_liq_a
+            use_bsp_b = stake_b > 0 and liq_b > 0 and liq_b < min_liq_b
+            actual_a  = stake_a if use_bsp_a else actual_a
+            actual_b  = stake_b if use_bsp_b else actual_b
+            skipped   = False
+        else:
+            use_bsp_b = stake_b > 0 and liq_b > 0 and liq_b < min_liq_b
+            actual_b  = stake_b if use_bsp_b else actual_b
+            skipped   = not use_bsp_b
+
     if skipped:
         send(f"⏭️ 💰 <b>SKIP - {race_label}</b>\n⚠️ {liq_reason}")
         return
@@ -581,7 +637,7 @@ def _live_bet_job(race: dict, state: dict):
         lines.append(f"ℹ️ Pick 2 below min price — backing Pick 1 solo")
     elif stake_a == 0 and stake_b > 0:
         lines.append(f"⏭️ Weak gap + P2 shorter — £{actual_b:.2f} on Pick 2 only (gap={gap})")
-    elif actual_b < stake_b:
+    elif actual_b < stake_b and not use_bsp_b:
         lines.append(
             f"⚠️ Stake reduced £{stake_b:.0f}→£{actual_b:.0f} "
             f"(P1 liq: £{liq_a:.0f}, P2 liq: £{liq_b:.0f})"
@@ -590,8 +646,19 @@ def _live_bet_job(race: dict, state: dict):
     bets_placed    = []
     balance_before = balance
 
-    def _try_back(sel_id, horse, stake, label, live_price, liq):
+    def _try_back(sel_id, horse, stake, label, live_price, liq, use_bsp=False):
         if stake == 0 or sel_id is None:
+            return None
+        if use_bsp:
+            bet = place_bsp(market_id, sel_id, stake)
+            if bet:
+                bet["horse_name"] = horse
+                lines.append(
+                    f"🔄 {label}: {horse} — BSP £{stake:.2f} "
+                    f"(liq too low: £{liq:.0f})"
+                )
+                return bet
+            lines.append(f"❌ {label}: {horse} - BSP order rejected")
             return None
         min_price = 1.2 if tsr else MIN_BACK_PRICE
         if not live_price or live_price < min_price:
@@ -608,8 +675,8 @@ def _live_bet_job(race: dict, state: dict):
         return None
 
     a_label = "⭐ Pick 1 (TSR)" if tsr else "⭐ Pick 1"
-    bet_a = _try_back(a_sel_id, a_name, actual_a, a_label, a_live, liq_a)
-    bet_b = _try_back(b_sel_id, b_name, actual_b, "🔵 Pick 2", b_live, liq_b)
+    bet_a = _try_back(a_sel_id, a_name, actual_a, a_label, a_live, liq_a, use_bsp=use_bsp_a)
+    bet_b = _try_back(b_sel_id, b_name, actual_b, "🔵 Pick 2", b_live, liq_b, use_bsp=use_bsp_b)
 
     if bet_a: bets_placed.append(bet_a)
     if bet_b: bets_placed.append(bet_b)
@@ -627,14 +694,16 @@ def _live_bet_job(race: dict, state: dict):
     settle_bets = []
     for b in bets_placed:
         matched    = b.get("size_matched") or b.get("size", 0)
-        win_credit = round(matched * (b["price"] - 1) * 0.95, 2)
+        price      = b.get("price") or 0
+        win_credit = round(matched * (price - 1) * 0.95, 2) if price > 1 else 0
         settle_bets.append({
             "bet_id":               str(b.get("bet_id", "")),
             "type":                 "BACK",
             "horse":                b.get("horse_name", "?"),
-            "price":                b["price"],
+            "price":                price,
             "stake":                matched,
             "potential_win_credit": win_credit,
+            "bsp":                  b.get("bsp", False),
         })
 
     # ── Live place bets ───────────────────────────────────────────────────────
@@ -720,6 +789,10 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     Place bets scale with win stake tier. Place prices stored for streak tracker.
     Liquidity checks applied to both win and place bets so paper results
     reflect realistic exchange fill conditions.
+
+    BSP fallback: when liquidity is below the dynamic threshold, the bet is
+    logged as a BSP bet with price=None. At settlement, the Racing API SP
+    is used as the price — the most accurate paper proxy for BSP.
     """
     off_str    = race.get("off", "?")
     course     = race.get("course", "?")
@@ -805,11 +878,32 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
 
     redirect = stake_a == 0 if not place_only else False
 
-    actual_a, actual_b, _, _ = apply_liquidity(
+    actual_a, actual_b, skipped, _ = apply_liquidity(
         stake_a if not place_only else 0.0,
         stake_b if not place_only else 0.0,
         liq_a, liq_b, redirect
     )
+
+    # ── Paper BSP fallback ────────────────────────────────────────────────────
+    # When liquidity is below dynamic threshold, flag as BSP.
+    # Price logged as None — settlement uses Racing API SP instead.
+    use_bsp_a = False
+    use_bsp_b = False
+    if not place_only and mkt_ok:
+        if skipped and (liq_a > 0 or liq_b > 0):
+            min_liq_a = min_liquidity_for_price(a_live or 0, stake_a) if stake_a > 0 else 0
+            min_liq_b = min_liquidity_for_price(b_live or 0, stake_b) if stake_b > 0 else 0
+            if not redirect:
+                use_bsp_a = stake_a > 0 and liq_a > 0 and liq_a < min_liq_a
+                use_bsp_b = stake_b > 0 and liq_b > 0 and liq_b < min_liq_b
+                actual_a  = stake_a if use_bsp_a else actual_a
+                actual_b  = stake_b if use_bsp_b else actual_b
+                skipped   = False
+            else:
+                use_bsp_b = stake_b > 0 and liq_b > 0 and liq_b < min_liq_b
+                actual_b  = stake_b if use_bsp_b else actual_b
+                skipped   = not use_bsp_b
+
     if place_only:
         actual_a, actual_b = 0.0, 0.0
     elif not mkt_ok:
@@ -836,27 +930,39 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
         lines.append(f"⏭️ Weak gap + P2 shorter — £{actual_b:.2f} on Pick 2 only (gap={gap})")
     elif stake_b == 0 and stake_a > 0:
         lines.append(f"ℹ️ Pick 2 below min price — backing Pick 1 solo")
-    elif actual_b < stake_b and mkt_ok:
+    elif actual_b < stake_b and mkt_ok and not use_bsp_b:
         lines.append(
             f"⚠️ Stake reduced £{stake_b:.0f}→£{actual_b:.0f} "
             f"(P1 liq: £{liq_a:.0f}, P2 liq: £{liq_b:.0f})"
         )
 
-    def _log_win(horse, stake, price, liq, label):
+    def _log_win(horse, stake, price, liq, label, use_bsp=False):
         if stake == 0:
             return
-        if price and price > (1.2 if tsr else 1.0):
+        if use_bsp:
+            lines.append(
+                f"🔄 {label}: {horse} — BSP £{stake:.2f} "
+                f"(liq too low: £{liq:.0f}, will settle at SP)"
+            )
+            paper_bets.append({
+                "horse": horse, "price": None, "stake": stake,
+                "label": label, "bsp": True,
+            })
+        elif price and price > (1.2 if tsr else 1.0):
             lines.append(
                 f"📝 {label}: {horse} @ {price:.2f} - paper £{stake:.2f}"
                 + (f" (liq: £{liq:.0f})" if mkt_ok and liq else "")
             )
-            paper_bets.append({"horse": horse, "price": price, "stake": stake, "label": label})
+            paper_bets.append({
+                "horse": horse, "price": price, "stake": stake,
+                "label": label, "bsp": False,
+            })
         else:
             lines.append(f"⚠️ {label}: {horse} - no usable price")
 
     a_label = "⭐ Pick 1 (TSR)" if tsr else "⭐ Pick 1"
-    _log_win(a_name, actual_a, a_live, liq_a, a_label)
-    _log_win(b_name, actual_b, b_live, liq_b, "🔵 Pick 2")
+    _log_win(a_name, actual_a, a_live, liq_a, a_label, use_bsp=use_bsp_a)
+    _log_win(b_name, actual_b, b_live, liq_b, "🔵 Pick 2", use_bsp=use_bsp_b)
 
     if place_only and not paper_bets:
         lines.append("🐴 <b>Two-horse race — place bets only</b>")
@@ -871,7 +977,6 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     # Place stake scales with tier via get_place_stake().
     # Capped at £2 for GOOD/SKIP tiers.
     # Liquidity checked — skips horses where exchange cannot fill the bet.
-    # This ensures paper results reflect real-world exchange fill conditions.
     place_bets  = []
     cons_places = _race_cons_places(race)
 
@@ -895,10 +1000,6 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                     p_liq   = p_info.get("back_size", 0.0)
                     if not p_price or p_price < 1.1:
                         continue
-                    # ── Paper liquidity check ─────────────────────────────────
-                    # Skip if exchange cannot realistically fill the place bet.
-                    # This prevents paper overstating returns on thin markets
-                    # (e.g. long-odds horses at small courses).
                     if p_liq > 0 and p_liq < MIN_LIQUIDITY:
                         lines.append(
                             f"⏭️ 📍 {horse} @ {p_price:.2f} — place liquidity "
@@ -1131,10 +1232,14 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             b_price = top2.get("sp_dec")
             p2_sc   = _pick2_score(r)
             gap     = _score_gap(r)
-            s_a, s_b = pick_stakes(
-                profit, is_tsr_trigger(r), a_price, b_price,
-                tier=r.get("tier", 0), pick2_score=p2_sc, score_gap=gap
-            )
+            if a_price and b_price:
+                s_a, s_b = pick_stakes(
+                    profit, is_tsr_trigger(r), a_price, b_price,
+                    tier=r.get("tier", 0), pick2_score=p2_sc, score_gap=gap
+                )
+            else:
+                s_a = 2.0 if r.get("tier", 0) in {2, -1} else get_stake(profit)
+                s_b = s_a
             off_dt  = _parse_off_dt(r)
             bet_at  = (off_dt - timedelta(minutes=BET_BEFORE_MINUTES) + timedelta(hours=1)).strftime("%H:%M") if off_dt else "?"
             p1_note = " (odds-on→skip)" if (a_price and a_price < MIN_PICK1_PRICE) else ""
