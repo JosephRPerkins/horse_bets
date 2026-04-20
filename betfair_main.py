@@ -711,14 +711,18 @@ def _live_bet_job(race: dict, state: dict):
     if bet_b: bets_placed.append(bet_b)
 
     if not bets_placed:
-        lines.append("\nℹ️ No bets placed")
+        lines.append("\nℹ️ No win bets placed — checking place market")
         send("\n".join(lines))
-        return
+        # Don't return — fall through to place bets
+        balance_after = get_balance()
+        placement_ts  = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        settle_bets   = []
 
-    send("\n".join(lines))
-    time.sleep(2)
-    balance_after = get_balance()
-    placement_ts  = log_bet_placed(race, bets_placed, balance_before, balance_after)
+    if bets_placed:
+        send("\n".join(lines))
+        time.sleep(2)
+        balance_after = get_balance()
+        placement_ts  = log_bet_placed(race, bets_placed, balance_before, balance_after)
 
     settle_bets = []
     for b in bets_placed:
