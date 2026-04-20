@@ -653,7 +653,10 @@ def _live_bet_job(race: dict, state: dict):
     ]
 
     if redirect:
-        lines.append(f"⏭️ Pick 1 odds-on ({a_live}) — £{actual_b:.2f} on Pick 2 only")
+        if a_live and a_live < MIN_PICK1_PRICE:
+            lines.append(f"⏭️ Pick 1 odds-on ({a_live}) — £{actual_b:.2f} on Pick 2 only")
+        else:
+            lines.append(f"⏭️ Weak gap + P2 shorter ({a_live} vs {b_live}) — £{actual_b:.2f} on Pick 2 only (gap={gap})")
     elif stake_b == 0 and stake_a > 0:
         lines.append(f"ℹ️ Pick 2 below min price — backing Pick 1 solo")
     elif stake_a == 0 and stake_b > 0:
@@ -986,7 +989,10 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
         lines.append("⚠️ No Betfair market - using RA odds")
 
     if redirect:
-        lines.append(f"⏭️ Pick 1 odds-on ({a_live}) — £{actual_b:.2f} on Pick 2 only")
+        if a_live and a_live < MIN_PICK1_PRICE:
+            lines.append(f"⏭️ Pick 1 odds-on ({a_live}) — £{actual_b:.2f} on Pick 2 only")
+        else:
+            lines.append(f"⏭️ Weak gap + P2 shorter ({a_live} vs {b_live}) — £{actual_b:.2f} on Pick 2 only (gap={gap})")
     elif stake_a == 0 and stake_b > 0 and not redirect:
         lines.append(f"⏭️ Weak gap + P2 shorter — £{actual_b:.2f} on Pick 2 only (gap={gap})")
     elif stake_b == 0 and stake_a > 0:
