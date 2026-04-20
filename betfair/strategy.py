@@ -49,6 +49,7 @@ ATTRITION_DIST_F = 20.0
 
 MIN_PICK1_PRICE = 2.0
 MIN_PICK2_PRICE = 1.2
+MAX_PICK2_PRICE = 20.0  # skip win bet on P2 if SP > 20/1 — poor ROI
 
 MIN_PICK2_SCORE_FOR_REDIRECT = 5
 MIN_PICK2_PRICE_FOR_REDIRECT = 4.0
@@ -194,6 +195,8 @@ def should_back_pick2(pick2_price, pick1_price=None, tier: int = TIER_STD) -> bo
     if tier == TIER_SUPREME:
         return True
     if pick2_price < MIN_PICK2_PRICE:
+        return False
+    if pick2_price > MAX_PICK2_PRICE:
         return False
     if pick1_price and pick1_price < 10.0 and pick2_price < pick1_price * 0.4:
         return False
