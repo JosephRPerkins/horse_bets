@@ -418,10 +418,12 @@ def format_result(
     cons_win = outcome.get("cons_win", False)
 
     # Header
+    a_won_hdr = outcome.get("a_pos") == 1 or (horse_a or {}).get("position") == "1"
+    b_won_hdr = horse_b and (outcome.get("b_pos") == 1 or horse_b.get("position") == "1")
     if std_win:
         icon = WIN
-    elif cons_win:
-        icon = "🟡"   # cons win only
+    elif cons_win or a_won_hdr or b_won_hdr:
+        icon = "🟡"
     else:
         icon = LOSS
 
@@ -464,21 +466,30 @@ def format_result(
 
     lines.append(f"\n{DIVIDER}")
 
-    # ── Overall outcome ───────────────────────────────────────────────────────
+    # ── Per-horse summary ─────────────────────────────────────────────────────
+    a_won    = outcome.get("a_pos") == 1 or (horse_a or {}).get("position") == "1"
+    b_won    = outcome.get("b_pos") == 1 or (horse_b or {}).get("position") == "1"
+    a_placed = outcome.get("std_a") or outcome.get("cons_a")
+    b_placed = outcome.get("std_b") or outcome.get("cons_b")
+
+    def horse_summary(name, won, placed, placed_std, placed_cons):
+        if won:            return f"{WIN} <b>{name}</b> — WON"
+        if placed_std:     return f"{WIN} <b>{name}</b> — PLACED (std)"
+        if placed_cons:    return f"🟡 <b>{name}</b> — PLACED (cons only)"
+        return              f"{LOSS} <b>{name}</b> — unplaced"
+
+    a_sum = horse_summary(a_name, a_won, a_placed, a_placed_std, a_placed_cons)
+    b_sum = horse_summary(b_name, b_won, b_placed, b_placed_std, b_placed_cons) if horse_b else None
+
     if tier >= TIER_GOOD:
-        if std_win:
-            lines.append(f"{WIN} <b>STD WIN</b> + {WIN} <b>CONS WIN</b>")
-        elif cons_win:
-            lines.append(f"· STD LOSS | {WIN} <b>CONS WIN</b>")
-        else:
-            lines.append(f"{LOSS} <b>BOTH LOST</b>")
+        lines.append(a_sum)
+        if b_sum:
+            lines.append(b_sum)
     else:
-        if std_win:
-            lines.append(f"{INFO} Info only — pair would have WON (std)")
-        elif cons_win:
-            lines.append(f"{INFO} Info only — pair would have WON (cons)")
-        else:
-            lines.append(f"{INFO} Info only — pair would have LOST")
+        lines.append(f"{INFO} Info only")
+        lines.append(a_sum)
+        if b_sum:
+            lines.append(b_sum)
 
     # ── Full result table ─────────────────────────────────────────────────────
     all_runners = race.get("all_runners", [])
