@@ -72,6 +72,62 @@ def midnight_job():
                 logger.info(f"midnight_job: archived today.json as {yesterday}.json")
         except Exception as e:
             logger.error(f"midnight_job: failed to archive today.json: {e}")
+
+        from betfair.api import _norm_horse as _norm
+        # ── Enrich archived card with yesterday's results ─────────────────
+        try:
+            import requests as _requests
+            yesterday_results_url = (
+                f"{config.RACING_API_BASE_URL}/results"
+            )
+            auth = (config.RACING_API_USERNAME, config.RACING_API_PASSWORD)
+            res = _requests.get(
+                yesterday_results_url,
+                params={"date": yesterday, "region": "gb"},
+                auth=auth, timeout=30
+            )
+            if res.status_code == 200:
+                results_data = res.json()
+                results_by_id = {}
+                for race in results_data.get("results", []):
+                    rid = race.get("race_id") or race.get("id")
+                    if rid:
+                        results_by_id[rid] = race
+
+                # Load archived card and enrich
+                with open(archive_path) as f:
+                    card = json.load(f)
+
+                enriched = 0
+                for race in card.get("races", []):
+                    rid = race.get("race_id")
+                    result = results_by_id.get(rid)
+                    if not result:
+                        continue
+                    # Add finishing positions and final SP to each runner
+                    result_runners = {
+                        _norm(r.get("horse","")): r
+                        for r in result.get("runners", [])
+                    }
+                    for runner in (race.get("all_runners") or []):
+                        norm = _norm(runner.get("horse",""))
+                        rr = result_runners.get(norm)
+                        if rr:
+                            runner["finish_pos"] = rr.get("position")
+                            runner["sp_dec_final"] = rr.get("sp_dec")
+                            runner["bsp_final"] = rr.get("bsp") or ""
+                    race["result_enriched"] = True
+                    enriched += 1
+
+                with open(archive_path, "w") as f:
+                    json.dump(card, f, indent=2, default=str)
+                logger.info(
+                    f"midnight_job: enriched {enriched} races with results "
+                    f"in {yesterday}.json"
+                )
+        except Exception as e:
+            logger.error(f"midnight_job: result enrichment failed: {e}")
+      
         os.remove(today_card)
         logger.info("midnight_job: cleared stale today.json")
 
