@@ -263,22 +263,19 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
             horse    = bet.get("horse", "?")
             price    = bet.get("price", 1.0)
             stake    = bet.get("stake", 0.0)
-            c_places = result_cons_places
             pos      = _get_finish_pos(result, horse)
-
-            if pos is not None and pos <= c_places:
+            if pos is not None and pos <= result_std_places:
                 profit = round(stake * (price - 1) * (1 - COMMISSION), 2)
                 place_pnl += profit
                 picks_cons.append(True)
                 place_results.append((bet, True, profit,
-                                      f"PLACED top {c_places} (+£{profit:.2f})"))
+                                      f"PLACED top {result_std_places} (+£{profit:.2f})"))
             else:
                 place_pnl -= stake
                 picks_cons.append(False)
                 pos_s = f"{pos}th" if pos else "NR/inc"
                 place_results.append((bet, False, -stake,
                                       f"UNPLACED {pos_s} (-£{stake:.2f})"))
-
             picks_std.append(pos is not None and pos <= result_std_places)
 
         std_win   = len(picks_std)  >= 2 and all(picks_std[:2])
