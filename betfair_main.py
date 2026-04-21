@@ -345,14 +345,13 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
             horse    = bet["horse"]
             price    = bet["price"]
             stake    = bet["stake"]
-            c_places = bet.get("cons_places", cons_places)
             pos      = _get_finish_pos(result, horse)
 
-            if pos is not None and pos <= c_places:
+            if pos is not None and pos <= std_places:
                 profit = round(stake * (price - 1) * (1 - COMMISSION), 2)
                 place_pnl += profit
                 picks_placed_cons.append(True)
-                lines.append(f"✅ 📍 {horse} @ {price:.2f} - PLACED top {c_places} (+£{profit:.2f})")
+                lines.append(f"✅ 📍 {horse} @ {price:.2f} - PLACED top {std_places} (+£{profit:.2f})")
             else:
                 place_pnl -= stake
                 picks_placed_cons.append(False)
