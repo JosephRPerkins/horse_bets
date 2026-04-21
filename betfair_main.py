@@ -692,7 +692,7 @@ def _live_bet_job(race: dict, state: dict):
                 bet["horse_name"] = horse
                 lines.append(
                     f"🔄 {label}: {horse} — BSP £{stake:.2f} "
-                    f"(back liq: £{liq:.0f} — insufficient for limit order)"
+                    f"(guaranteed fill @ market price | back liq: £{liq:.0f} | lay: £{lay_liq:.0f})"
                 )
                 return bet
             lines.append(f"❌ {label}: {horse} - BSP order rejected")
@@ -717,8 +717,8 @@ def _live_bet_job(race: dict, state: dict):
         return None
 
     a_label = "⭐ Pick 1 (TSR)" if tsr else "⭐ Pick 1"
-    bet_a = _try_back(a_sel_id, a_name, actual_a, a_label, a_live, liq_a, lay_liq=lay_liq_a, use_bsp=use_bsp_a)
-    bet_b = _try_back(b_sel_id, b_name, actual_b, "🔵 Pick 2", b_live, liq_b, lay_liq=lay_liq_b, use_bsp=use_bsp_b)
+    bet_a = _try_back(a_sel_id, a_name, actual_a, a_label, a_live, liq_a, lay_liq=lay_liq_a, use_bsp=True)
+    bet_b = _try_back(b_sel_id, b_name, actual_b, "🔵 Pick 2", b_live, liq_b, lay_liq=lay_liq_b, use_bsp=True)
 
     if bet_a: bets_placed.append(bet_a)
     if bet_b: bets_placed.append(bet_b)
