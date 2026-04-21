@@ -749,6 +749,7 @@ def _live_bet_job(race: dict, state: dict):
             "stake":                matched,
             "potential_win_credit": win_credit,
             "bsp":                  b.get("bsp", False),
+            "market_id":            market_id,  # add this
         })
 
     # ── Live place bets ───────────────────────────────────────────────────────
