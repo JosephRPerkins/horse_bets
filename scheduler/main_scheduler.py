@@ -6,11 +6,11 @@ Sets up APScheduler and registers all jobs.
 Daily fixed jobs:
   - 00:01  midnight_job          — clear stale card, pre-fetch tomorrow
   - 11:00  morning_briefing_job  — fetch card, analyse, send 12pm summary
-  - 09:30  bet365_job            — send Bet365 daily action plan
+  ## no longer used - 09:30  bet365_job            — send Bet365 daily action plan
   - dynamic end_of_day_job       — 90 mins after last race
 
 Per-race dynamic jobs (registered after morning briefing):
-  - T-10min  pre_race_job(race_id)
+  - T-5min  pre_race_job(race_id)
   - shared   result_poller — every 60s, checks all unsettled races
 
 Startup logic:
@@ -75,18 +75,18 @@ def build_scheduler() -> BackgroundScheduler:
         replace_existing=True,
     )
 
-    # Bet365 daily plan at 09:30
-    scheduler.add_job(
-        run_bet365_daily,
-        CronTrigger(hour=9, minute=30),
-        id="bet365_daily",
-        replace_existing=True,
-    )
+    ## Bet365 daily plan at 09:30
+    #scheduler.add_job(
+    #    run_bet365_daily,
+    #    CronTrigger(hour=9, minute=30),
+    #    id="bet365_daily",
+    #    replace_existing=True,
+    #)
 
-    logger.info(
-        f"Scheduler: fixed jobs registered "
-        f"(briefing at {config.MORNING_BRIEFING_TIME})"
-    )
+    #logger.info(
+    #    f"Scheduler: fixed jobs registered "
+    #    f"(briefing at {config.MORNING_BRIEFING_TIME})"
+    #)
 
     return scheduler
 
