@@ -44,7 +44,7 @@ def send(text: str) -> bool:
             timeout=10,
         )
         if not r.ok:
-            logger.warning(f"Telegram send failed: {r.status_code} {r.text[:200]}")
+            logger.warning(f"Telegram send failed: {r.status_code} {r.text} | msg={repr(text[:300])}")
         return r.ok
     except Exception as e:
         logger.error(f"Telegram send error: {e}")
