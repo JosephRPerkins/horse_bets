@@ -34,7 +34,7 @@ _client = None
 # ── Login / session ───────────────────────────────────────────────────────────
 
 def get_client():
-    """Return (and re-login) the betfairlightweight client."""
+    """Return the betfairlightweight client, re-logging in only if needed."""
     global _client
     import betfairlightweight
     if _client is None:
@@ -47,10 +47,10 @@ def get_client():
             app_key  = config.BETFAIR_APP_KEY,
             certs    = certs,
         )
-    try:
-        _client.login()
-    except Exception as e:
-        logger.warning(f"Betfair re-login: {e}")
+        try:
+            _client.login()
+        except Exception as e:
+            logger.warning(f"Betfair re-login: {e}")
     return _client
 
 
