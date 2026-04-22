@@ -938,6 +938,8 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
             break
 
     mkt, odds, bf_runners = _get_market(race)
+    if mkt is None:
+        return
     mkt_ok   = mkt is not None
     a_sel_id = find_selection_id(a_name, bf_runners) if mkt_ok else None
     b_sel_id = find_selection_id(b_name, bf_runners) if mkt_ok else None
@@ -947,6 +949,13 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
 
     a_live = a_info.get("back") or top1.get("sp_dec")
     b_live = b_info.get("back") or top2.get("sp_dec")
+
+    if a_live is None or b_live is None:
+        logger.error(
+            f"Missing prices: a_live={a_live}, b_live={b_live} — skipping bet"
+        )
+        return
+      
     liq_a      = a_info.get("back_size", 0.0)
     liq_b      = b_info.get("back_size", 0.0)
     lay_liq_a  = a_info.get("lay_size", 0.0)
