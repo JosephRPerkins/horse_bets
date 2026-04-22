@@ -803,15 +803,9 @@ def _live_bet_job(race: dict, state: dict):
             place_lines    = ["------------------------------", f"📍 <b>Place bets{win_note}</b>"]
 
             n_runners = len(race.get("all_runners") or [])
-            def _place_ev_ok(horse_price):
-                if not horse_price: return True
-                if horse_price < 2.0: return True   # odds-on: always place
-                if 3.0 <= horse_price < 5.0 and n_runners >= 9: return False
-                if 8.0 <= horse_price < 13.0 and n_runners >= 6: return False
-                return True
             horses_to_place = [
-                h for h, sp in [(a_name, a_live), (b_name, b_live)]
-                if h and h != "?" and _place_ev_ok(sp)
+                  h for h in [a_name, b_name]
+                if h and h != "?"
             ]
             for horse in horses_to_place:
                 sel_id = find_selection_id(horse, place_runners)
@@ -840,26 +834,25 @@ def _live_bet_job(race: dict, state: dict):
                 actual_p_stake     = min(p_stake, max_stake_from_liq)
                 actual_p_stake     = max(min_stake, round(actual_p_stake / 2) * 2)
 
-                place_bet = place_back(place_mkt.market_id, sel_id, p_price, actual_p_stake)
+                place_bet = place_bsp(place_mkt.market_id, sel_id, actual_p_stake)
                 if place_bet:
                     place_bet["horse_name"] = horse
                     matched_p = place_bet.get("size_matched") or actual_p_stake
-                    tag = "⏳" if place_bet.get("pending") else "✅"
-                    p_required = round(matched_p * (p_price - 1), 2)
-                    p_lay_ok   = "✅" if p_lay_liq >= p_required else "⚠️"
                     place_lines.append(
-                        f"{tag} 📍 {horse} @ {p_price:.2f} £{matched_p:.2f} "
-                        f"(back: £{p_liq:.0f} | payout: £{p_required:.0f} {p_lay_ok} lay: £{p_lay_liq:.0f})"
+                        f"✅ 📍 {horse} — BSP £{matched_p:.2f} "
+                        f"(guaranteed fill | lay liq: £{p_lay_liq:.0f})"
                     )
                     live_place_bets.append({
                         "horse":       horse,
-                        "price":       p_price,
-                        "stake":       matched_p or p_stake,
+                        "price":       None,
+                        "stake":       matched_p or actual_p_stake,
                         "cons_places": cons_places,
                         "lay_liq":     p_lay_liq,
+                        "bsp":         True,
+                        "bet_id":      str(place_bet.get("bet_id", "")),
                     })
                 else:
-                    place_lines.append(f"❌ 📍 {horse} @ {p_price:.2f} — rejected by Betfair")
+                    place_lines.append(f"❌ 📍 {horse} — BSP place order rejected")
 
             if len(place_lines) > 2:
                 send("\n".join(place_lines))
@@ -1133,15 +1126,9 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                         logger.info(f"{race_label}: place market still empty after retry")
 
                 n_runners = len(race.get("all_runners") or [])
-                def _place_ev_ok(horse_price):
-                    if not horse_price: return True
-                    if horse_price < 2.0: return True
-                    if 3.0 <= horse_price < 5.0 and n_runners >= 9: return False
-                    if 8.0 <= horse_price < 13.0 and n_runners >= 6: return False
-                    return True
                 horses_to_place = [
-                    h for h, sp in [(a_name, a_live), (b_name, b_live)]
-                    if h and h != "?" and _place_ev_ok(sp)
+                    h for h in [a_name, b_name]
+                    if h and h != "?"
                 ]
                 for horse in horses_to_place:
                     sel_id = find_selection_id(horse, place_runners)
