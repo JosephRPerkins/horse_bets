@@ -63,10 +63,12 @@ def midnight_job():
     today_card = os.path.join(config.DIR_CARDS, "today.json")
     if os.path.exists(today_card):
         try:
-            import shutil
-            from datetime import date, timedelta
-            yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
-            archive_path = os.path.join(config.DIR_CARDS, f"{yesterday}.json")
+            import shutil, json as _json
+            with open(today_card) as _f:
+                _card = _json.load(_f)
+            card_date = _card.get("date")
+            if card_date:
+                archive_path = os.path.join(config.DIR_CARDS, f"{card_date}.json")
             if not os.path.exists(archive_path):
                 shutil.copy2(today_card, archive_path)
                 logger.info(f"midnight_job: archived today.json as {yesterday}.json")
