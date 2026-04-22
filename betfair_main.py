@@ -752,6 +752,30 @@ def _live_bet_job(race: dict, state: dict):
             "market_id":            market_id,  # add this
         })
 
+    # ── Save market IDs for BSP fetch job ────────────────────────────────────
+    try:
+        import json as _json
+        from datetime import date as _date
+        bsp_log_path = os.path.join(
+            os.path.dirname(__file__), "data", "results",
+            f"{_date.today().strftime('%Y-%m-%d')}_markets.json"
+        )
+        existing = []
+        if os.path.exists(bsp_log_path):
+            with open(bsp_log_path) as f:
+                existing = _json.load(f)
+        existing.append({
+            "race_label": race_label,
+            "race_id":    race.get("race_id",""),
+            "market_id":  market_id,
+            "ts":         datetime.now().isoformat(),
+            "bets":       settle_bets,
+        })
+        with open(bsp_log_path, "w") as f:
+            _json.dump(existing, f, indent=2)
+    except Exception as e:
+        logger.error(f"BSP log save failed: {e}")
+      
     # ── Live place bets ───────────────────────────────────────────────────────
     live_place_bets = []
     p_stake         = get_place_stake(profit, tier)
