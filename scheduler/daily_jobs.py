@@ -182,7 +182,13 @@ def midnight_job():
             with open(today_path, "w") as f:
                 json.dump({"date": tomorrow_str, "races": analysed},
                           f, indent=2, default=str)
-
+            # Also save dated copy for historical analysis
+            dated_path = os.path.join(config.DIR_CARDS, f"{tomorrow_str}.json")
+            if not os.path.exists(dated_path):
+                import shutil
+                shutil.copy2(today_path, dated_path)
+                logger.info(f"midnight_job: saved dated card {tomorrow_str}.json")
+              
             logger.info(
                 f"midnight_job: saved {len(analysed)} analysed races "
                 f"to today.json (attempt {attempt+1})"
