@@ -178,7 +178,14 @@ def fetch_today_card(scheduler=None, notify: bool = False) -> int:
             json.dump({"date": today_str, "races": analysed}, f,
                       indent=2, default=str)
         logger.info(f"fetch_today_card: saved {len(analysed)} races to disk")
-
+        # Save dated copy for historical analysis
+        dated_path = os.path.join(config.DIR_CARDS, f"{today_str}.json")
+        if not os.path.exists(dated_path):
+            import shutil
+            shutil.copy2(card_path, dated_path)
+            logger.info(f"fetch_today_card: saved dated card {today_str}.json")
+      
+      
         if scheduler is not None:
             from scheduler.main_scheduler import register_race_jobs
             register_race_jobs(scheduler, analysed)
