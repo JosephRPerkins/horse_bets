@@ -610,6 +610,12 @@ def _live_bet_job(race: dict, state: dict):
         profit, tsr, a_live, b_live, tier=tier,
         pick2_score=p2_sc, pick3_price=pick3_price, score_gap=gap
     )
+    # In <=4 runner races, back clear favourite solo (win only, no P2)
+    n_runners_live = len(race.get("all_runners") or [])
+    if n_runners_live <= 4 and a_live and b_live and a_live < 2.0 and b_live > a_live * 4.0:
+        stake_b = 0.0
+        lines.append(f"ℹ️ ≤4 runners, clear favourite — backing P1 only")
+    place_only = (stake_a == -1.0 and stake_b == -1.0)
     place_only = (stake_a == -1.0 and stake_b == -1.0)
     if place_only:
         send(f"🐴 💰 {race_label} — two-horse race, place market only (paper tracking)")
@@ -993,6 +999,12 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
         profit, tsr, a_live, b_live, tier=tier,
         pick2_score=p2_sc, pick3_price=pick3_price, score_gap=gap
     )
+    # In <=4 runner races, back clear favourite solo (win only, no P2)
+    n_runners_live = len(race.get("all_runners") or [])
+    if n_runners_live <= 4 and a_live and b_live and a_live < 2.0 and b_live > a_live * 4.0:
+        stake_b = 0.0
+        lines.append(f"ℹ️ ≤4 runners, clear favourite — backing P1 only")
+    place_only = (stake_a == -1.0 and stake_b == -1.0)
     place_only = (stake_a == -1.0 and stake_b == -1.0)
     if not place_only and stake_a == 0 and stake_b == 0:
         if not silent:
