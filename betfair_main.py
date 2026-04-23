@@ -938,9 +938,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
             break
 
     mkt, odds, bf_runners = _get_market(race)
-    if mkt is None:
-        return
-    mkt_ok   = mkt is not None
+    mkt_ok = mkt is not None
     a_sel_id = find_selection_id(a_name, bf_runners) if mkt_ok else None
     b_sel_id = find_selection_id(b_name, bf_runners) if mkt_ok else None
 
