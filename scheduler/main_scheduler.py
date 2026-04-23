@@ -4,8 +4,10 @@ scheduler/main_scheduler.py
 Sets up APScheduler and registers all jobs.
 
 Daily fixed jobs:
-  - 00:01  midnight_job          — clear stale card, pre-fetch tomorrow
-  - 11:00  morning_briefing_job  — fetch card, analyse, send 12pm summary
+  - 04.45  midnight_job          — clear stale card, pre-fetch tomorrow
+  - 05.00  fetch_data.py         — extracts yesteday's Racing API data and stores it
+  - 05.10 & 05.15 restart main & betfair jobs
+  - 1st race T-30  morning_briefing_job  — fetch card, analyse, send 12pm summary
   ## no longer used - 09:30  bet365_job            — send Bet365 daily action plan
   - dynamic end_of_day_job       — 90 mins after last race
 
@@ -66,14 +68,14 @@ def build_scheduler() -> BackgroundScheduler:
         replace_existing=True,
     )
 
-    # Fetch card + send morning briefing at MORNING_BRIEFING_TIME
-    h, m = _parse_time(config.MORNING_BRIEFING_TIME)
-    scheduler.add_job(
-        lambda: morning_briefing_job(scheduler),
-        CronTrigger(hour=h, minute=m),
-        id="morning_briefing",
-        replace_existing=True,
-    )
+    ## Fetch card + send morning briefing at MORNING_BRIEFING_TIME
+    #h, m = _parse_time(config.MORNING_BRIEFING_TIME)
+    #scheduler.add_job(
+    #    lambda: morning_briefing_job(scheduler),
+    #    CronTrigger(hour=h, minute=m),
+    #    id="morning_briefing",
+    #    replace_existing=True,
+    #)
 
     ## Bet365 daily plan at 09:30
     #scheduler.add_job(
@@ -149,7 +151,7 @@ def register_race_jobs(scheduler: BackgroundScheduler,
         default=None
     )
     if first_off:
-        refresh_time = first_off - timedelta(minutes=20)
+        refresh_time = first_off - timedelta(minutes=30)
         if refresh_time > now:
             scheduler.add_job(
                 lambda: morning_briefing_job(scheduler),
