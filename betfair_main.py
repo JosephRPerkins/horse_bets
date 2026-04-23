@@ -803,10 +803,15 @@ def _live_bet_job(race: dict, state: dict):
             place_lines    = ["------------------------------", f"📍 <b>Place bets{win_note}</b>"]
 
             n_runners = len(race.get("all_runners") or [])
-            horses_to_place = [
-                  h for h in [a_name, b_name]
-                if h and h != "?"
-            ]
+            # No place bets on <=4 runner races (Betfair only pays winner)
+            if n_runners <= 4:
+                place_lines.append("📍 ≤4 runners — place bets skipped (win only)")
+                horses_to_place = []
+            else:
+                horses_to_place = [
+                    h for h in [a_name, b_name]
+                    if h and h != "?"
+                ]
             for horse in horses_to_place:
                 sel_id = find_selection_id(horse, place_runners)
                 if sel_id is None:
@@ -1133,10 +1138,15 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                         logger.info(f"{race_label}: place market still empty after retry")
 
                 n_runners = len(race.get("all_runners") or [])
-                horses_to_place = [
-                    h for h in [a_name, b_name]
-                    if h and h != "?"
-                ]
+                # No place bets on <=4 runner races (Betfair only pays winner)
+                if n_runners <= 4:
+                    place_lines.append("📍 ≤4 runners — place bets skipped (win only)")
+                    horses_to_place = []
+                else:
+                    horses_to_place = [
+                        h for h in [a_name, b_name]
+                        if h and h != "?"
+                    ]            
                 for horse in horses_to_place:
                     sel_id = find_selection_id(horse, place_runners)
                     if sel_id is None:
