@@ -56,12 +56,14 @@ def _hydrate_today_analysed(races: list[dict]) -> None:
 
 def midnight_job():
     """
-    Runs at midnight. Clears stale today.json and pre-fetches tomorrow's card.
+    Runs at 04:45. Archives today's card, enriches with results, resets streaks.
+    No card fetch — that happens at T-30 before first race via morning_briefing_job.
     """
-    logger.info("midnight_job: rolling to new day")
+    logger.info("midnight_job: archiving and resetting")
 
     today_card = os.path.join(config.DIR_CARDS, "today.json")
     if os.path.exists(today_card):
+        # ── Archive today.json as dated file ─────────────────────────────
         try:
             import shutil, json as _json
             with open(today_card) as _f:
@@ -69,149 +71,63 @@ def midnight_job():
             card_date = _card.get("date")
             if card_date:
                 archive_path = os.path.join(config.DIR_CARDS, f"{card_date}.json")
-            if not os.path.exists(archive_path):
-                shutil.copy2(today_card, archive_path)
-                logger.info(f"midnight_job: archived today.json as {yesterday}.json")
+                if not os.path.exists(archive_path):
+                    shutil.copy2(today_card, archive_path)
+                    logger.info(f"midnight_job: archived today.json as {card_date}.json")
+                # ── Enrich archived card with results ─────────────────────
+                try:
+                    from betfair.api import _norm_horse as _norm
+                    import requests as _requests
+                    auth = (config.RACING_API_USERNAME, config.RACING_API_PASSWORD)
+                    res = _requests.get(
+                        f"{config.RACING_API_BASE_URL}/results",
+                        params={"date": card_date, "region": "gb"},
+                        auth=auth, timeout=30
+                    )
+                    if res.status_code == 200:
+                        results_by_id = {
+                            (r.get("race_id") or r.get("id")): r
+                            for r in res.json().get("results", [])
+                            if r.get("race_id") or r.get("id")
+                        }
+                        with open(archive_path) as f:
+                            card = json.load(f)
+                        enriched = 0
+                        for race in card.get("races", []):
+                            result = results_by_id.get(race.get("race_id"))
+                            if not result:
+                                continue
+                            result_runners = {
+                                _norm(r.get("horse","")): r
+                                for r in result.get("runners", [])
+                            }
+                            for runner in (race.get("all_runners") or []):
+                                rr = result_runners.get(_norm(runner.get("horse","")))
+                                if rr:
+                                    runner["finish_pos"]    = rr.get("position")
+                                    runner["sp_dec_final"]  = rr.get("sp_dec")
+                                    runner["bsp_final"]     = rr.get("bsp") or ""
+                            race["result_enriched"] = True
+                            enriched += 1
+                        with open(archive_path, "w") as f:
+                            json.dump(card, f, indent=2, default=str)
+                        logger.info(f"midnight_job: enriched {enriched} races in {card_date}.json")
+                except Exception as e:
+                    logger.error(f"midnight_job: result enrichment failed: {e}")
         except Exception as e:
-            logger.error(f"midnight_job: failed to archive today.json: {e}")
+            logger.error(f"midnight_job: archive failed: {e}")
 
-        from betfair.api import _norm_horse as _norm
-        # ── Enrich archived card with yesterday's results ─────────────────
-        try:
-            import requests as _requests
-            yesterday_results_url = (
-                f"{config.RACING_API_BASE_URL}/results"
-            )
-            auth = (config.RACING_API_USERNAME, config.RACING_API_PASSWORD)
-            res = _requests.get(
-                yesterday_results_url,
-                params={"date": yesterday, "region": "gb"},
-                auth=auth, timeout=30
-            )
-            if res.status_code == 200:
-                results_data = res.json()
-                results_by_id = {}
-                for race in results_data.get("results", []):
-                    rid = race.get("race_id") or race.get("id")
-                    if rid:
-                        results_by_id[rid] = race
-
-                # Load archived card and enrich
-                with open(archive_path) as f:
-                    card = json.load(f)
-
-                enriched = 0
-                for race in card.get("races", []):
-                    rid = race.get("race_id")
-                    result = results_by_id.get(rid)
-                    if not result:
-                        continue
-                    # Add finishing positions and final SP to each runner
-                    result_runners = {
-                        _norm(r.get("horse","")): r
-                        for r in result.get("runners", [])
-                    }
-                    for runner in (race.get("all_runners") or []):
-                        norm = _norm(runner.get("horse",""))
-                        rr = result_runners.get(norm)
-                        if rr:
-                            runner["finish_pos"] = rr.get("position")
-                            runner["sp_dec_final"] = rr.get("sp_dec")
-                            runner["bsp_final"] = rr.get("bsp") or ""
-                    race["result_enriched"] = True
-                    enriched += 1
-
-                with open(archive_path, "w") as f:
-                    json.dump(card, f, indent=2, default=str)
-                logger.info(
-                    f"midnight_job: enriched {enriched} races with results "
-                    f"in {yesterday}.json"
-                )
-        except Exception as e:
-            logger.error(f"midnight_job: result enrichment failed: {e}")
-      
         os.remove(today_card)
         logger.info("midnight_job: cleared stale today.json")
 
+    # ── Reset streaks ─────────────────────────────────────────────────────
     try:
         from notifications.streak_tracker import reset_streaks
         reset_streaks()
     except Exception as e:
         logger.warning(f"midnight_job: streak reset failed: {e}")
 
-    # Retry up to 3 times if card comes back empty
-    MAX_RETRIES = 3
-    for attempt in range(MAX_RETRIES):
-        try:
-            client       = RacingAPIClient()
-            tomorrow_str = date.today().strftime("%Y-%m-%d")
-            racecards    = client.get_tomorrows_racecards(
-                region_codes=config.TARGET_REGIONS
-            )
-            if not racecards:
-                logger.warning(f"midnight_job: empty card on attempt {attempt+1}")
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(300)  # wait 5 mins before retry
-                    continue
-                # All retries exhausted
-                from notifications.telegram import send_main
-                send_main(
-                    f"⚠️ <b>Midnight card fetch failed</b>\n"
-                    f"No races returned after {MAX_RETRIES} attempts.\n"
-                    f"Today's races will need manual fetch — send /refresh."
-                )
-                logger.error("midnight_job: all retries exhausted, no races")
-                break
-
-            # Analyse races through the full pipeline
-            norm_racecards = []
-            for race in racecards:
-                norm_runners = [RacingAPIClient.normalise_runner(r)
-                                for r in race.get("runners", [])]
-                norm_racecards.append({**race, "runners": norm_runners})
-
-            analysed = [_analyse_race(r) for r in norm_racecards]
-
-            # Save tomorrow.json (raw)
-            path = os.path.join(config.DIR_CARDS, "tomorrow.json")
-            with open(path, "w") as f:
-                json.dump({"date": tomorrow_str, "racecards": racecards}, f)
-
-            # Save today.json (analysed, ready for betfair bot)
-            today_path = os.path.join(config.DIR_CARDS, "today.json")
-            with open(today_path, "w") as f:
-                json.dump({"date": tomorrow_str, "races": analysed},
-                          f, indent=2, default=str)
-            # Also save dated copy for historical analysis
-            dated_path = os.path.join(config.DIR_CARDS, f"{tomorrow_str}.json")
-            if not os.path.exists(dated_path):
-                import shutil
-                shutil.copy2(today_path, dated_path)
-                logger.info(f"midnight_job: saved dated card {tomorrow_str}.json")
-              
-            logger.info(
-                f"midnight_job: saved {len(analysed)} analysed races "
-                f"to today.json (attempt {attempt+1})"
-            )
-            from notifications.telegram import send_main
-            send_main(
-                f"🌙 <b>Midnight card fetched</b>\n"
-                f"{len(analysed)} races loaded for {tomorrow_str}."
-            )
-            break
-
-        except Exception as e:
-            logger.error(f"midnight_job attempt {attempt+1} failed: {e}")
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(300)
-            else:
-                from notifications.telegram import send_main
-                send_main(
-                    f"❌ <b>Midnight card fetch error</b>\n"
-                    f"Exception after {MAX_RETRIES} attempts: {e}\n"
-                    f"Send /refresh manually in the morning."
-                )
-
+    logger.info("midnight_job: done")
 
 # ── Morning briefing job ───────────────────────────────────────────────────────
 
