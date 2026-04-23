@@ -61,7 +61,7 @@ def build_scheduler() -> BackgroundScheduler:
 
     scheduler.add_job(
         midnight_job,
-        CronTrigger(hour=0, minute=1),
+        CronTrigger(hour=4, minute=45),
         id="midnight",
         replace_existing=True,
     )
