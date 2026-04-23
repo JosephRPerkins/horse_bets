@@ -343,7 +343,7 @@ def save_results_day(race_date: str, races: list) -> str:
 
 
 def save_cards_day(card_date: str, races: list) -> str:
-    filepath = os.path.join(config.DIR_CARDS, f"{card_date}.json")
+    filepath = os.path.join(config.DIR_RAW, f"{card_date}.json")
     with open(filepath, "w") as f:
         json.dump({
             "date":       card_date,
