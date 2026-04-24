@@ -1555,15 +1555,14 @@ def main():
 
     scheduler.add_job(
         lambda: _midnight_job(scheduler, state),
-        CronTrigger(hour=0, minute=1, timezone="Europe/London"),
+        CronTrigger(hour=4, minute=45, timezone="Europe/London"),
         id="midnight",
     )
-    for h, m, jid in [(11, 50, "refresh_1150"), (12, 30, "refresh_1230")]:
-        scheduler.add_job(
-            lambda: _midday_refresh(scheduler, state),
-            CronTrigger(hour=h, minute=m, timezone="Europe/London"),
-            id=jid,
-        )
+    scheduler.add_job(
+        lambda: _midday_refresh(scheduler, state),
+        CronTrigger(hour=10, minute=0, timezone="Europe/London"),
+        id="midday_refresh",
+    )
 
     scheduler.start()
     logger.info("Scheduler started")
