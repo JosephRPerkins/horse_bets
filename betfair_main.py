@@ -1496,7 +1496,7 @@ def _midnight_job(scheduler: BackgroundScheduler, state: dict):
         reset_streaks()
     except Exception as e:
         logger.error(f"streak_tracker reset failed: {e}")
-    startup(scheduler, state, send_briefing=True)
+    startup(scheduler, state, send_briefing=False)
 
 
 def _midday_refresh(scheduler: BackgroundScheduler, state: dict):
