@@ -789,6 +789,7 @@ def _live_bet_job(race: dict, state: dict):
   
     try:
         place_mkt, _ = find_place_market(race)
+        logger.info(f"{race_label}: place_mkt={'found' if place_mkt else 'None'}")
         place_odds_map = {}
         place_runners  = []
         if place_mkt is not None:
