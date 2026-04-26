@@ -58,7 +58,9 @@ for fp in sorted(glob.glob("data/cards/2026-*.json")):
         racecards = d.get("racecards") or d.get("races") or []
         idx = {}
         for rc in racecards:
-            key = (rc.get("course", ""), rc.get("off", ""))
+            # Use off_dt as join key: off format differs (card=24h, raw=12h)
+            # but off_dt is consistent ISO in both
+            key = (rc.get("course", ""), rc.get("off_dt", rc.get("off", "")))
             idx[key] = rc
         cards_by_date[date_str] = idx
     except Exception:
@@ -803,7 +805,7 @@ for race in races_all:
     runners = race.get("runners", [])
     field_sizes.append(len(runners))
     going_counts[race.get("going","?")] += 1
-    class_counts[str(race.get("class","?"))] += 1
+    class_counts[str(race.get("class","?")).replace("Class ", "").strip()] += 1
     surface_counts[race.get("surface","?")] += 1
     for r in runners:
         v = to_float(r.get("rpr"))
@@ -823,7 +825,7 @@ print(f"\n  Going breakdown (top 10):")
 for k,v in sorted(going_counts.items(), key=lambda x:-x[1])[:10]:
     print(f"    {k:30} {v:>4} races")
 print(f"\n  Class breakdown:")
-for k,v in sorted(class_counts.items(), key=lambda x: (x[0]=='?', x[0])):
+for k,v in sorted(class_counts.items(), key=lambda x: (x[0] not in [str(i) for i in range(1,8)], x[0])):
     print(f"    Class {k:5} {v:>4} races ({v/len(races_all)*100:.1f}%)")
 print()
 
@@ -853,7 +855,7 @@ for race in races_all:
     valid.sort(key=lambda x: x[0])
     fav_sp, fav_pos, _ = valid[0]
     surf = race.get("surface", "?")
-    cls  = str(race.get("class", "?"))
+    cls  = str(race.get("class", "?")).replace("Class ", "").strip()
     gf   = going_family(race.get("going", ""))
     if nrunners <= 5:    fb = "2-5"
     elif nrunners <= 8:  fb = "6-8"
@@ -1152,8 +1154,8 @@ for race in races_all:
     runners  = race.get("runners", [])
     nrunners = len(runners)
     ps       = place_spots_for(nrunners)
-    cls      = str(race.get("class", "?"))
-    cs       = class_stats[cls]
+    cls = str(race.get("class", "?")).replace("Class ", "").strip()
+    cs  = class_stats[cls]
     cs["n"] += 1
     cs["fields"].append(nrunners)
 
@@ -1237,7 +1239,7 @@ else:
         with open(raw_path) as fh:
             rd = json.load(fh)
         raw_races = rd.get("results") or rd.get("races") or []
-        raw_idx   = {(r.get("course",""), r.get("off","")): r for r in raw_races}
+        raw_idx   = {(r.get("course",""), r.get("off_dt", r.get("off",""))): r for r in raw_races}
 
         for key, card_race in card_idx.items():
             raw_race = raw_idx.get(key)
