@@ -463,7 +463,8 @@ caps = [1, 2, 3, 4, 5, None]
 weights = [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0]
 
 # Header
-print(f"  {'mw\\cap':>8}", end="")
+header = "mw\\cap"
+print(f"  {header:>8}", end="")
 for cap in caps:
     print(f"  {'top'+str(cap) if cap else 'no cap':>9}", end="")
 print()
