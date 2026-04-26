@@ -374,19 +374,15 @@ print()
 # ═══════════════════════════════════════════════════════════════════════════════
 
 print("╔══════════════════════════════════════════════════════════════════════════╗")
-print("║  SECTION 2: MULTISTAGE vs CURRENT MODEL (same card races)               ║")
-print("║  Current model = card top1/top2. Best multistage = mw=0.0 agree filter  ║")
+print("║  SECTION 2: MULTISTAGE vs CURRENT MODEL — full P1 + P2 comparison      ║")
+print("║  Current model = card top1/top2.  Multistage = mw=0.0 and mw=0.6       ║")
+print("║  Win bets: £2 flat each. Place bets: £2 flat each (standard terms).    ║")
 print("╚══════════════════════════════════════════════════════════════════════════╝")
 print()
 
-cur_total=cur_p1w=cur_p2w=cur_p1p=cur_p2p=0
-cur_p1_win_pnl=cur_p2_win_pnl=cur_p1_plc_pnl=cur_p2_plc_pnl=0.0
-
-ms_total=ms_p1w=ms_p2w=ms_p1p=ms_p2p=ms_skip=0
-ms_p1_win_pnl=ms_p2_win_pnl=ms_p1_plc_pnl=ms_p2_plc_pnl=0.0
-
-# Track per-race for direct comparison
-agree_races = []   # races where both models pick same P1
+# ── Collect per-race results for both models ──────────────────────────────────
+# Each entry: dict with all P1/P2 win/place outcomes and P&L for both models
+race_results = []
 
 for date, card_races in sorted(cards.items()):
     for card_race in card_races:
@@ -395,167 +391,270 @@ for date, card_races in sorted(cards.items()):
         raw = raw_by_key.get(key)
         if not raw: continue
 
-        runners = card_race.get("all_runners",[])
-        if len(runners) < 2: continue
-
+        runners     = card_race.get("all_runners",[])
         raw_runners = raw.get("runners",[])
+        if len(runners) < 2 or len(raw_runners) < 2: continue
+
         n   = len(raw_runners)
         ps  = place_spots_betfair(n)
         div = place_divisor(n)
 
-        pos_by_horse = {strip_country(r.get("horse","")): r
-                        for r in raw_runners}
+        pos_by_horse = {strip_country(r.get("horse","")): r for r in raw_runners}
 
-        def outcome2(name):
+        def get_outcome(name):
             r = pos_by_horse.get(strip_country(name))
             if not r: return None, None
-            try: p = int(str(r.get("position","")).strip())
+            try:    pos = int(str(r.get("position","")).strip())
             except: return None, None
-            return p, to_float(r.get("sp_dec"))
+            return pos, to_float(r.get("sp_dec"))
 
-        # Current model picks
+        def win_pnl(sp, won):
+            if not sp: return 0.0
+            return (sp-1)*2 if won else -2.0
+
+        def plc_pnl(sp, placed, d):
+            if not sp or not d: return 0.0
+            ep = (sp-1)/d + 1
+            return (ep-1)*2 if placed else -2.0
+
+        # ── Current model ─────────────────────────────────────────────────────
         top1 = card_race.get("top1") or {}
         top2 = card_race.get("top2") or {}
-        cp1, cp1_sp = outcome2(top1.get("horse",""))
-        cp2, cp2_sp = outcome2(top2.get("horse",""))
-        if cp1 is None: continue
+        cp1_pos, cp1_sp = get_outcome(top1.get("horse",""))
+        cp2_pos, cp2_sp = get_outcome(top2.get("horse",""))
+        if cp1_pos is None: continue
 
-        cp1_won  = cp1 == 1
-        cp2_won  = cp2 == 1 if cp2 else False
-        cp1_plcd = cp1 <= ps
-        cp2_plcd = (cp2 <= ps) if cp2 else False
+        cp1_won  = cp1_pos == 1
+        cp1_plcd = cp1_pos <= ps
+        cp2_won  = cp2_pos == 1   if cp2_pos is not None else False
+        cp2_plcd = cp2_pos <= ps  if cp2_pos is not None else False
 
-        cur_total  += 1
-        cur_p1w    += cp1_won
-        cur_p2w    += cp2_won
-        cur_p1p    += cp1_plcd
-        cur_p2p    += cp2_plcd
-        if cp1_sp:
-            cur_p1_win_pnl += (cp1_sp-1)*2 if cp1_won else -2
-            if div:
-                ep = (cp1_sp-1)/div+1
-                cur_p1_plc_pnl += (ep-1)*2 if cp1_plcd else -2
-        if cp2_sp:
-            cur_p2_win_pnl += (cp2_sp-1)*2 if cp2_won else -2
-            if div:
-                ep = (cp2_sp-1)/div+1
-                cur_p2_plc_pnl += (ep-1)*2 if cp2_plcd else -2
+        cur = dict(
+            p1_won=cp1_won, p1_plcd=cp1_plcd,
+            p2_won=cp2_won, p2_plcd=cp2_plcd,
+            p1_win_pnl  = win_pnl(cp1_sp, cp1_won),
+            p1_plc_pnl  = plc_pnl(cp1_sp, cp1_plcd, div),
+            p2_win_pnl  = win_pnl(cp2_sp, cp2_won),
+            p2_plc_pnl  = plc_pnl(cp2_sp, cp2_plcd, div),
+            either_won  = cp1_won or cp2_won,
+            either_plcd = cp1_plcd or cp2_plcd,
+            both_plcd   = cp1_plcd and cp2_plcd,
+        )
 
-        # Multistage (mw=0.0, no filter for fair comparison)
-        ranked = rank_card_runners(runners, card_race.get("going",""), 0.0)
-        mp1    = ranked[0]
-        mp2    = ranked[1]
-        mp1_pos, mp1_sp = outcome2(mp1.get("horse",""))
-        mp2_pos, mp2_sp = outcome2(mp2.get("horse",""))
-        if mp1_pos is None: continue
+        # ── Multistage mw=0.0 ─────────────────────────────────────────────────
+        ranked_0 = rank_card_runners(runners, card_race.get("going",""), 0.0)
+        mp1_0, mp2_0 = ranked_0[0], ranked_0[1]
+        mp1_0_pos, mp1_0_sp = get_outcome(mp1_0.get("horse",""))
+        mp2_0_pos, mp2_0_sp = get_outcome(mp2_0.get("horse",""))
+        if mp1_0_pos is None: continue
 
-        mp1_won  = mp1_pos == 1
-        mp2_won  = mp2_pos == 1 if mp2_pos else False
-        mp1_plcd = mp1_pos <= ps
-        mp2_plcd = (mp2_pos <= ps) if mp2_pos else False
+        mp1_0_won  = mp1_0_pos == 1
+        mp1_0_plcd = mp1_0_pos <= ps
+        mp2_0_won  = mp2_0_pos == 1   if mp2_0_pos is not None else False
+        mp2_0_plcd = mp2_0_pos <= ps  if mp2_0_pos is not None else False
 
-        ms_total  += 1
-        ms_p1w    += mp1_won
-        ms_p2w    += mp2_won
-        ms_p1p    += mp1_plcd
-        ms_p2p    += mp2_plcd
-        if mp1_sp:
-            ms_p1_win_pnl += (mp1_sp-1)*2 if mp1_won else -2
-            if div:
-                ep = (mp1_sp-1)/div+1
-                ms_p1_plc_pnl += (ep-1)*2 if mp1_plcd else -2
-        if mp2_sp:
-            ms_p2_win_pnl += (mp2_sp-1)*2 if mp2_won else -2
-            if div:
-                ep = (mp2_sp-1)/div+1
-                ms_p2_plc_pnl += (ep-1)*2 if mp2_plcd else -2
+        ms0 = dict(
+            p1_won=mp1_0_won, p1_plcd=mp1_0_plcd,
+            p2_won=mp2_0_won, p2_plcd=mp2_0_plcd,
+            p1_win_pnl  = win_pnl(mp1_0_sp, mp1_0_won),
+            p1_plc_pnl  = plc_pnl(mp1_0_sp, mp1_0_plcd, div),
+            p2_win_pnl  = win_pnl(mp2_0_sp, mp2_0_won),
+            p2_plc_pnl  = plc_pnl(mp2_0_sp, mp2_0_plcd, div),
+            either_won  = mp1_0_won or mp2_0_won,
+            either_plcd = mp1_0_plcd or mp2_0_plcd,
+            both_plcd   = mp1_0_plcd and mp2_0_plcd,
+        )
 
-        if strip_country(top1.get("horse","")) == strip_country(mp1.get("horse","")):
-            agree_races.append((cp1_won, mp1_won, cp1_plcd, mp1_plcd))
+        # ── Multistage mw=0.6 ─────────────────────────────────────────────────
+        ranked_6 = rank_card_runners(runners, card_race.get("going",""), 0.6)
+        mp1_6, mp2_6 = ranked_6[0], ranked_6[1]
+        mp1_6_pos, mp1_6_sp = get_outcome(mp1_6.get("horse",""))
+        mp2_6_pos, mp2_6_sp = get_outcome(mp2_6.get("horse",""))
 
-header = f"  {'Model':<30} {'N':>5} {'P1win%':>8} {'P1plc%':>8} {'WinP&L':>10} {'PlcP&L':>10} {'P2win%':>8} {'P2plc%':>8}"
-print(header)
-print(f"  {'-'*82}")
+        if mp1_6_pos is None:
+            ms6 = ms0   # fallback
+        else:
+            mp1_6_won  = mp1_6_pos == 1
+            mp1_6_plcd = mp1_6_pos <= ps
+            mp2_6_won  = mp2_6_pos == 1   if mp2_6_pos is not None else False
+            mp2_6_plcd = mp2_6_pos <= ps  if mp2_6_pos is not None else False
+            ms6 = dict(
+                p1_won=mp1_6_won, p1_plcd=mp1_6_plcd,
+                p2_won=mp2_6_won, p2_plcd=mp2_6_plcd,
+                p1_win_pnl  = win_pnl(mp1_6_sp, mp1_6_won),
+                p1_plc_pnl  = plc_pnl(mp1_6_sp, mp1_6_plcd, div),
+                p2_win_pnl  = win_pnl(mp2_6_sp, mp2_6_won),
+                p2_plc_pnl  = plc_pnl(mp2_6_sp, mp2_6_plcd, div),
+                either_won  = mp1_6_won or mp2_6_won,
+                either_plcd = mp1_6_plcd or mp2_6_plcd,
+                both_plcd   = mp1_6_plcd and mp2_6_plcd,
+            )
 
-def print_model_row(label, n, p1w, p1p, wpl, ppl, p2w, p2p):
-    print(f"  {label:<30} {n:>5} "
-          f"{p1w/n*100:>7.1f}%  {p1p/n*100:>7.1f}%  "
-          f"{wpl:>+10.2f} {ppl:>+10.2f}  "
-          f"{p2w/n*100:>7.1f}%  {p2p/n*100:>7.1f}%")
+        race_results.append(dict(
+            n=n, ps=ps, div=div, cur=cur, ms0=ms0, ms6=ms6,
+            cur_p1_name = top1.get("horse",""),
+            ms0_p1_name = mp1_0.get("horse",""),
+            ms6_p1_name = mp1_6.get("horse",""),
+            winner = next((r.get("horse","") for r in raw_runners
+                           if str(r.get("position",""))=="1"), "?"),
+        ))
 
-if cur_total:
-    print_model_row("Current model (card top1/top2)", cur_total,
-                    cur_p1w, cur_p1p, cur_p1_win_pnl, cur_p1_plc_pnl,
-                    cur_p2w, cur_p2p)
-if ms_total:
-    print_model_row("Multistage mw=0.0 (pure stats)", ms_total,
-                    ms_p1w, ms_p1p, ms_p1_win_pnl, ms_p1_plc_pnl,
-                    ms_p2w, ms_p2p)
-
-# Best filtered multistage
-bf = evaluate_card(0.0, agree_filter=True)
-n  = bf["total"]
-if n:
-    print_model_row("Multistage mw=0.0 agree filter", n,
-                    bf["p1w"], bf["p1p"], bf["p1_win_pnl"], bf["p1_plc_pnl"],
-                    bf["p2w"], bf["p2p"])
-
-print()
-print(f"  Races where both models pick same P1: {len(agree_races)}/{ms_total}")
-if agree_races:
-    aw = sum(1 for r in agree_races if r[0])
-    ap = sum(1 for r in agree_races if r[2])
-    n  = len(agree_races)
-    print(f"  On those races — P1 win rate: {aw}/{n} ({aw/n*100:.1f}%)  "
-          f"P1 place rate: {ap}/{n} ({ap/n*100:.1f}%)")
+N = len(race_results)
+print(f"  Matched card races: {N}")
 print()
 
-# Direct head-to-head on races where they disagree
-disagree = []
-for date, card_races in sorted(cards.items()):
-    for card_race in card_races:
-        key = (card_race.get("course",""),
-               card_race.get("off_dt", card_race.get("off","")))
-        raw = raw_by_key.get(key)
-        if not raw: continue
-        runners = card_race.get("all_runners",[])
-        if len(runners) < 2: continue
-        raw_runners = raw.get("runners",[])
-        n   = len(raw_runners)
-        ps  = place_spots_betfair(n)
-        pos_by_horse = {strip_country(r.get("horse","")): r for r in raw_runners}
-        def o(name):
-            r = pos_by_horse.get(strip_country(name))
-            if not r: return None
-            try: return int(str(r.get("position","")).strip())
-            except: return None
-        top1 = card_race.get("top1") or {}
-        ranked = rank_card_runners(runners, card_race.get("going",""), 0.0)
-        mp1 = ranked[0]
-        if strip_country(top1.get("horse","")) == strip_country(mp1.get("horse","")): continue
-        cp = o(top1.get("horse",""))
-        mp = o(mp1.get("horse",""))
-        if cp is None or mp is None: continue
-        disagree.append((cp==1, mp==1, cp<=ps, mp<=ps, top1.get("horse",""), mp1.get("horse",""),
-                         next((r.get("horse") for r in raw_runners if str(r.get("position",""))=="1"), "?")))
+# ── 2A: Individual pick analysis ──────────────────────────────────────────────
+print(f"  {'─'*80}")
+print(f"  2A: INDIVIDUAL PICK ANALYSIS — P1 and P2 separately")
+print(f"  {'─'*80}")
+print(f"  {'Model':<28} {'N':>5} {'P1win%':>8} {'P2win%':>8} "
+      f"{'P1plc%':>8} {'P2plc%':>8} {'P1WinP&L':>10} {'P2WinP&L':>10} "
+      f"{'P1PlcP&L':>10} {'P2PlcP&L':>10}")
+print(f"  {'-'*100}")
+
+def summarise(results, key):
+    r = [rec[key] for rec in results]
+    n = len(r)
+    if not n: return
+    p1w   = sum(1 for x in r if x["p1_won"])
+    p2w   = sum(1 for x in r if x["p2_won"])
+    p1p   = sum(1 for x in r if x["p1_plcd"])
+    p2p   = sum(1 for x in r if x["p2_plcd"])
+    p1wpl = sum(x["p1_win_pnl"] for x in r)
+    p2wpl = sum(x["p2_win_pnl"] for x in r)
+    p1ppl = sum(x["p1_plc_pnl"] for x in r)
+    p2ppl = sum(x["p2_plc_pnl"] for x in r)
+    return n,p1w,p2w,p1p,p2p,p1wpl,p2wpl,p1ppl,p2ppl
+
+def print_individual(label, results, key):
+    s = summarise(results, key)
+    if not s: return
+    n,p1w,p2w,p1p,p2p,p1wpl,p2wpl,p1ppl,p2ppl = s
+    print(f"  {label:<28} {n:>5} "
+          f"{p1w/n*100:>7.1f}%  {p2w/n*100:>7.1f}%  "
+          f"{p1p/n*100:>7.1f}%  {p2p/n*100:>7.1f}%  "
+          f"{p1wpl:>+10.2f} {p2wpl:>+10.2f} "
+          f"{p1ppl:>+10.2f} {p2ppl:>+10.2f}")
+
+print_individual("Current model (top1/top2)", race_results, "cur")
+print_individual("Multistage mw=0.0",         race_results, "ms0")
+print_individual("Multistage mw=0.6",         race_results, "ms6")
+print()
+
+# ── 2B: P2-to-P2 direct comparison ───────────────────────────────────────────
+print(f"  {'─'*80}")
+print(f"  2B: P2-TO-P2 COMPARISON — where models disagree on P2")
+print(f"  {'─'*80}")
+
+p2_agree = [r for r in race_results
+            if strip_country(r["cur_p1_name"]) == strip_country(r["ms0_p1_name"])]
+p2_disagree = [r for r in race_results
+               if strip_country(r["cur_p1_name"]) != strip_country(r["ms0_p1_name"])]
+
+print(f"  Same P1 pick: {len(p2_agree)} races  |  Different P1 pick: {len(p2_disagree)} races")
+print()
+
+for subset_label, subset in [("All races", race_results),
+                               ("Same P1 pick", p2_agree),
+                               ("Different P1 pick", p2_disagree)]:
+    if not subset: continue
+    n = len(subset)
+    print(f"  {subset_label} ({n} races):")
+    print(f"  {'Pick':<22} {'Win%':>8} {'Place%':>8} {'WinP&L':>10} {'PlcP&L':>10}")
+    print(f"  {'-'*52}")
+    for model_key, pick_key, label in [
+        ("cur","p2","  Current P2"),
+        ("ms0","p2","  Multistage P2 (mw=0)"),
+        ("ms6","p2","  Multistage P2 (mw=0.6)"),
+    ]:
+        wins   = sum(1 for r in subset if r[model_key]["p2_won"])
+        placed = sum(1 for r in subset if r[model_key]["p2_plcd"])
+        wpnl   = sum(r[model_key]["p2_win_pnl"] for r in subset)
+        ppnl   = sum(r[model_key]["p2_plc_pnl"] for r in subset)
+        print(f"  {label:<22} {wins/n*100:>7.1f}%  {placed/n*100:>7.1f}%  "
+              f"{wpnl:>+10.2f} {ppnl:>+10.2f}")
+    print()
+
+# ── 2C: Combined P1+P2 outcomes ───────────────────────────────────────────────
+print(f"  {'─'*80}")
+print(f"  2C: COMBINED P1+P2 OUTCOMES — the actual unit of betting value")
+print(f"  Staking £2 win + £2 place on each pick = £8 per race total (if place mkt exists)")
+print(f"  {'─'*80}")
+print(f"  {'Model':<28} {'N':>5} {'EitherWon%':>11} {'EitherPlcd%':>12} "
+      f"{'BothPlcd%':>10} {'TotalWinP&L':>12} {'TotalPlcP&L':>12} {'Combined':>10}")
+print(f"  {'-'*98}")
+
+def print_combined(label, results, key):
+    r = [rec[key] for rec in results]
+    n = len(r)
+    if not n: return
+    ew   = sum(1 for x in r if x["either_won"])
+    ep   = sum(1 for x in r if x["either_plcd"])
+    bp   = sum(1 for x in r if x["both_plcd"])
+    wpnl = sum(x["p1_win_pnl"]+x["p2_win_pnl"] for x in r)
+    ppnl = sum(x["p1_plc_pnl"]+x["p2_plc_pnl"] for x in r)
+    print(f"  {label:<28} {n:>5} "
+          f"{ew/n*100:>10.1f}%  {ep/n*100:>11.1f}%  {bp/n*100:>9.1f}%  "
+          f"{wpnl:>+12.2f} {ppnl:>+12.2f} {wpnl+ppnl:>+10.2f}")
+
+print_combined("Current model (top1/top2)", race_results, "cur")
+print_combined("Multistage mw=0.0",         race_results, "ms0")
+print_combined("Multistage mw=0.6",         race_results, "ms6")
+print()
+
+# ── 2D: Race outcome categories ──────────────────────────────────────────────
+print(f"  {'─'*80}")
+print(f"  2D: RACE OUTCOME BREAKDOWN — what actually happens each race")
+print(f"  {'─'*80}")
+print(f"  {'Outcome':<28} {'Current':>10} {'MS mw=0':>10} {'MS mw=0.6':>12}")
+print(f"  {'-'*64}")
+
+outcomes = [
+    ("P1 wins",           lambda r,k: r[k]["p1_won"]),
+    ("P2 wins",           lambda r,k: r[k]["p2_won"]),
+    ("Either wins",       lambda r,k: r[k]["either_won"]),
+    ("P1 places",         lambda r,k: r[k]["p1_plcd"]),
+    ("P2 places",         lambda r,k: r[k]["p2_plcd"]),
+    ("Either places",     lambda r,k: r[k]["either_plcd"]),
+    ("Both place",        lambda r,k: r[k]["both_plcd"]),
+    ("Neither places",    lambda r,k: not r[k]["either_plcd"]),
+]
+n = len(race_results)
+for label, fn in outcomes:
+    c  = sum(1 for r in race_results if fn(r, "cur"))
+    m0 = sum(1 for r in race_results if fn(r, "ms0"))
+    m6 = sum(1 for r in race_results if fn(r, "ms6"))
+    print(f"  {label:<28} {c/n*100:>9.1f}%  {m0/n*100:>9.1f}%  {m6/n*100:>11.1f}%")
+print()
+
+# ── 2E: Disagreement head-to-head (P1 only) ───────────────────────────────────
+disagree = [(r["cur_p1_name"], r["ms0_p1_name"], r["winner"],
+             r["cur"]["p1_won"], r["ms0"]["p1_won"],
+             r["cur"]["p1_plcd"], r["ms0"]["p1_plcd"])
+            for r in race_results
+            if strip_country(r["cur_p1_name"]) != strip_country(r["ms0_p1_name"])]
 
 if disagree:
-    dw_cur = sum(1 for d in disagree if d[0])
-    dw_ms  = sum(1 for d in disagree if d[1])
-    dp_cur = sum(1 for d in disagree if d[2])
-    dp_ms  = sum(1 for d in disagree if d[3])
-    nd = len(disagree)
-    print(f"  Disagreement races ({nd}): current right={dw_cur} ({dw_cur/nd*100:.1f}%)  "
-          f"multistage right={dw_ms} ({dw_ms/nd*100:.1f}%)")
-    print(f"  Place:              current placed={dp_cur} ({dp_cur/nd*100:.1f}%)  "
-          f"multistage placed={dp_ms} ({dp_ms/nd*100:.1f}%)")
+    nd     = len(disagree)
+    dw_cur = sum(1 for d in disagree if d[3])
+    dw_ms  = sum(1 for d in disagree if d[4])
+    dp_cur = sum(1 for d in disagree if d[5])
+    dp_ms  = sum(1 for d in disagree if d[6])
+    print(f"  {'─'*80}")
+    print(f"  2E: P1 DISAGREEMENT HEAD-TO-HEAD ({nd} races)")
+    print(f"  {'─'*80}")
+    print(f"  Current right (P1 won):     {dw_cur}/{nd} ({dw_cur/nd*100:.1f}%)")
+    print(f"  Multistage right (P1 won):  {dw_ms}/{nd} ({dw_ms/nd*100:.1f}%)")
+    print(f"  Current P1 placed:          {dp_cur}/{nd} ({dp_cur/nd*100:.1f}%)")
+    print(f"  Multistage P1 placed:       {dp_ms}/{nd} ({dp_ms/nd*100:.1f}%)")
     print()
-    print(f"  {'Date-like':5} {'Current P1':22} {'Multistage P1':22} {'Winner':22}")
-    print(f"  {'-'*72}")
-    for d in disagree[:15]:
-        mark_c = "✓" if d[0] else " "
-        mark_m = "✓" if d[1] else " "
-        print(f"  {mark_c} {d[4][:20]:22} {mark_m} {d[5][:20]:22} {d[6][:20]:22}")
+    print(f"  {'Cur P1':22} {'MS P1':22} {'Winner':22} {'C':>3} {'M':>3}")
+    print(f"  {'-'*74}")
+    for d in disagree[:20]:
+        mc = "W" if d[3] else ("P" if d[5] else " ")
+        mm = "W" if d[4] else ("P" if d[6] else " ")
+        print(f"  {d[0][:20]:22} {d[1][:20]:22} {d[2][:20]:22} {mc:>3} {mm:>3}")
+    print(f"  (W=won, P=placed, blank=neither)")
 print()
 
 # ═══════════════════════════════════════════════════════════════════════════════
