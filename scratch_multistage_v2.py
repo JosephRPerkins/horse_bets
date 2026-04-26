@@ -370,6 +370,224 @@ for cap in [1,2,3,4,5,None]:
 print()
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 1B: FINE-GRAINED SWEEP — 0.05 steps from 0.30 to 0.70
+# Combined P1+P2 outcomes compared against current model baseline
+# ═══════════════════════════════════════════════════════════════════════════════
+
+print("╔══════════════════════════════════════════════════════════════════════════╗")
+print("║  SECTION 1B: FINE-GRAINED SWEEP — 0.05 steps, mw 0.30 to 0.70         ║")
+print("║  Combined P1+P2: £2 win + £2 place per pick. Current model as baseline ║")
+print("╚══════════════════════════════════════════════════════════════════════════╝")
+print()
+
+# Current model baseline — replay over same matched races
+cur_base = {
+    "n":0,
+    "p1w":0,"p2w":0,"p1p":0,"p2p":0,
+    "p1_win_pnl":0.0,"p2_win_pnl":0.0,
+    "p1_plc_pnl":0.0,"p2_plc_pnl":0.0,
+    "either_won":0,"either_plcd":0,"both_plcd":0,"neither_plcd":0,
+}
+
+for date, card_races in sorted(cards.items()):
+    for card_race in card_races:
+        key = (card_race.get("course",""),
+               card_race.get("off_dt", card_race.get("off","")))
+        raw = raw_by_key.get(key)
+        if not raw: continue
+        runners     = card_race.get("all_runners",[])
+        raw_runners = raw.get("runners",[])
+        if len(runners) < 2 or len(raw_runners) < 2: continue
+
+        n   = len(raw_runners)
+        ps  = place_spots_betfair(n)
+        div = place_divisor(n)
+        pos_by_horse = {strip_country(r.get("horse","")): r for r in raw_runners}
+
+        def _out(name):
+            r = pos_by_horse.get(strip_country(name))
+            if not r: return None, None
+            try:    pos = int(str(r.get("position","")).strip())
+            except: return None, None
+            return pos, to_float(r.get("sp_dec"))
+
+        top1 = card_race.get("top1") or {}
+        top2 = card_race.get("top2") or {}
+        cp1_pos, cp1_sp = _out(top1.get("horse",""))
+        cp2_pos, cp2_sp = _out(top2.get("horse",""))
+        if cp1_pos is None: continue
+
+        cp1_won  = cp1_pos == 1
+        cp1_plcd = cp1_pos <= ps
+        cp2_won  = cp2_pos == 1  if cp2_pos is not None else False
+        cp2_plcd = cp2_pos <= ps if cp2_pos is not None else False
+
+        cur_base["n"]           += 1
+        cur_base["p1w"]         += cp1_won
+        cur_base["p2w"]         += cp2_won
+        cur_base["p1p"]         += cp1_plcd
+        cur_base["p2p"]         += cp2_plcd
+        cur_base["either_won"]  += cp1_won or cp2_won
+        cur_base["either_plcd"] += cp1_plcd or cp2_plcd
+        cur_base["both_plcd"]   += cp1_plcd and cp2_plcd
+        cur_base["neither_plcd"]+= not (cp1_plcd or cp2_plcd)
+        if cp1_sp:
+            cur_base["p1_win_pnl"] += (cp1_sp-1)*2 if cp1_won else -2
+            if div: cur_base["p1_plc_pnl"] += ((cp1_sp-1)/div)*2 if cp1_plcd else -2
+        if cp2_sp:
+            cur_base["p2_win_pnl"] += (cp2_sp-1)*2 if cp2_won else -2
+            if div: cur_base["p2_plc_pnl"] += ((cp2_sp-1)/div)*2 if cp2_plcd else -2
+
+# Fine sweep function — returns combined stats per race for a given mw
+def fine_sweep(market_weight):
+    res = {
+        "n":0,
+        "p1w":0,"p2w":0,"p1p":0,"p2p":0,
+        "p1_win_pnl":0.0,"p2_win_pnl":0.0,
+        "p1_plc_pnl":0.0,"p2_plc_pnl":0.0,
+        "either_won":0,"either_plcd":0,"both_plcd":0,"neither_plcd":0,
+    }
+    for date, card_races in sorted(cards.items()):
+        for card_race in card_races:
+            key = (card_race.get("course",""),
+                   card_race.get("off_dt", card_race.get("off","")))
+            raw = raw_by_key.get(key)
+            if not raw: continue
+            runners     = card_race.get("all_runners",[])
+            raw_runners = raw.get("runners",[])
+            if len(runners) < 2 or len(raw_runners) < 2: continue
+
+            n   = len(raw_runners)
+            ps  = place_spots_betfair(n)
+            div = place_divisor(n)
+            pos_by_horse = {strip_country(r.get("horse","")): r for r in raw_runners}
+
+            def _o(name):
+                r = pos_by_horse.get(strip_country(name))
+                if not r: return None, None
+                try:    pos = int(str(r.get("position","")).strip())
+                except: return None, None
+                return pos, to_float(r.get("sp_dec"))
+
+            ranked = rank_card_runners(runners, card_race.get("going",""), market_weight)
+            p1, p2 = ranked[0], ranked[1]
+            p1_pos, p1_sp = _o(p1.get("horse",""))
+            p2_pos, p2_sp = _o(p2.get("horse",""))
+            if p1_pos is None: continue
+
+            p1_won  = p1_pos == 1
+            p1_plcd = p1_pos <= ps
+            p2_won  = p2_pos == 1  if p2_pos is not None else False
+            p2_plcd = p2_pos <= ps if p2_pos is not None else False
+
+            res["n"]            += 1
+            res["p1w"]          += p1_won
+            res["p2w"]          += p2_won
+            res["p1p"]          += p1_plcd
+            res["p2p"]          += p2_plcd
+            res["either_won"]   += p1_won or p2_won
+            res["either_plcd"]  += p1_plcd or p2_plcd
+            res["both_plcd"]    += p1_plcd and p2_plcd
+            res["neither_plcd"] += not (p1_plcd or p2_plcd)
+            if p1_sp:
+                res["p1_win_pnl"] += (p1_sp-1)*2 if p1_won else -2
+                if div: res["p1_plc_pnl"] += ((p1_sp-1)/div)*2 if p1_plcd else -2
+            if p2_sp:
+                res["p2_win_pnl"] += (p2_sp-1)*2 if p2_won else -2
+                if div: res["p2_plc_pnl"] += ((p2_sp-1)/div)*2 if p2_plcd else -2
+    return res
+
+# Print header
+print(f"  {'MktWt':>7} {'N':>5} {'P1win%':>8} {'P2win%':>8} "
+      f"{'P1plc%':>8} {'P2plc%':>8} "
+      f"{'EitherWon%':>11} {'EitherPlcd%':>12} {'NeitherPlcd%':>13} "
+      f"{'WinP&L':>9} {'PlcP&L':>9} {'Combined':>10}")
+print(f"  {'-'*112}")
+
+# Current model baseline row
+cb = cur_base
+cn = cb["n"]
+if cn:
+    comb_win = cb["p1_win_pnl"] + cb["p2_win_pnl"]
+    comb_plc = cb["p1_plc_pnl"] + cb["p2_plc_pnl"]
+    print(f"  {'CURRENT':>7} {cn:>5} "
+          f"{cb['p1w']/cn*100:>7.1f}%  {cb['p2w']/cn*100:>7.1f}%  "
+          f"{cb['p1p']/cn*100:>7.1f}%  {cb['p2p']/cn*100:>7.1f}%  "
+          f"{cb['either_won']/cn*100:>10.1f}%  {cb['either_plcd']/cn*100:>11.1f}%  "
+          f"{cb['neither_plcd']/cn*100:>12.1f}%  "
+          f"{comb_win:>+9.2f} {comb_plc:>+9.2f} {comb_win+comb_plc:>+10.2f}")
+    print(f"  {'-'*112}")
+
+# Fine sweep 0.30 to 0.70 in 0.05 steps
+best_combined = None
+best_mw = None
+fine_results = {}
+
+for mw_step in range(30, 75, 5):
+    mw = mw_step / 100
+    r  = fine_sweep(mw)
+    fine_results[mw] = r
+    n  = r["n"]
+    if not n: continue
+    comb_win = r["p1_win_pnl"] + r["p2_win_pnl"]
+    comb_plc = r["p1_plc_pnl"] + r["p2_plc_pnl"]
+    combined = comb_win + comb_plc
+    if best_combined is None or combined > best_combined:
+        best_combined = combined
+        best_mw = mw
+
+    # Mark rows that beat current on combined P&L
+    beat = " *" if cn and (comb_win+comb_plc) > (cur_base["p1_win_pnl"]+cur_base["p2_win_pnl"]+cur_base["p1_plc_pnl"]+cur_base["p2_plc_pnl"]) else "  "
+    print(f"  {mw:>7.2f} {n:>5} "
+          f"{r['p1w']/n*100:>7.1f}%  {r['p2w']/n*100:>7.1f}%  "
+          f"{r['p1p']/n*100:>7.1f}%  {r['p2p']/n*100:>7.1f}%  "
+          f"{r['either_won']/n*100:>10.1f}%  {r['either_plcd']/n*100:>11.1f}%  "
+          f"{r['neither_plcd']/n*100:>12.1f}%  "
+          f"{comb_win:>+9.2f} {comb_plc:>+9.2f} {comb_win+comb_plc:>+10.2f}{beat}")
+
+print(f"  {'-'*112}")
+print(f"  * = beats current model on combined P&L")
+print()
+
+# Best mw summary
+if best_mw is not None:
+    r  = fine_results[best_mw]
+    n  = r["n"]
+    cw = r["p1_win_pnl"] + r["p2_win_pnl"]
+    cp = r["p1_plc_pnl"] + r["p2_plc_pnl"]
+    print(f"  Best mw by combined P&L: {best_mw:.2f}  (combined = {cw+cp:+.2f})")
+    print()
+
+    # Head-to-head vs current on every metric
+    print(f"  Head-to-head: mw={best_mw:.2f} vs current model")
+    print(f"  {'Metric':<28} {'Current':>12} {'mw='+str(best_mw):>12} {'Delta':>10}")
+    print(f"  {'-'*64}")
+    metrics = [
+        ("P1 win%",          cb["p1w"]/cn*100,           r["p1w"]/n*100),
+        ("P2 win%",          cb["p2w"]/cn*100,           r["p2w"]/n*100),
+        ("Either won%",      cb["either_won"]/cn*100,    r["either_won"]/n*100),
+        ("P1 place%",        cb["p1p"]/cn*100,           r["p1p"]/n*100),
+        ("P2 place%",        cb["p2p"]/cn*100,           r["p2p"]/n*100),
+        ("Either placed%",   cb["either_plcd"]/cn*100,   r["either_plcd"]/n*100),
+        ("Both placed%",     cb["both_plcd"]/cn*100,     r["both_plcd"]/n*100),
+        ("Neither placed%",  cb["neither_plcd"]/cn*100,  r["neither_plcd"]/n*100),
+        ("P1 win P&L",       cb["p1_win_pnl"],           r["p1_win_pnl"]),
+        ("P2 win P&L",       cb["p2_win_pnl"],           r["p2_win_pnl"]),
+        ("P1 place P&L",     cb["p1_plc_pnl"],           r["p1_plc_pnl"]),
+        ("P2 place P&L",     cb["p2_plc_pnl"],           r["p2_plc_pnl"]),
+        ("Total win P&L",    cb["p1_win_pnl"]+cb["p2_win_pnl"], cw),
+        ("Total place P&L",  cb["p1_plc_pnl"]+cb["p2_plc_pnl"], cp),
+        ("Combined P&L",     cb["p1_win_pnl"]+cb["p2_win_pnl"]+cb["p1_plc_pnl"]+cb["p2_plc_pnl"], cw+cp),
+    ]
+    for label, cur_val, ms_val in metrics:
+        delta = ms_val - cur_val
+        is_pct = "%" in label
+        fmt = lambda v: f"{v:+.1f}%" if is_pct else f"{v:+.2f}"
+        win_marker = " +" if delta > 0 else (" -" if delta < 0 else "  ")
+        print(f"  {label:<28} {cur_val:>+12.2f}  {ms_val:>+12.2f}  {fmt(delta):>10}{win_marker}")
+    print()
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # SECTION 2: VS CURRENT MODEL (card top1/top2 vs multistage P1/P2)
 # ═══════════════════════════════════════════════════════════════════════════════
 
