@@ -1249,10 +1249,14 @@ else:
             raw_runners  = raw_race.get("runners", [])
             nrunners     = len(raw_runners)
             ps           = place_spots_for(nrunners)
-            res_by_horse = {r.get("horse","").lower(): r for r in raw_runners}
+            res_by_horse = {
+                r.get("horse","").split(" (")[0].strip().lower(): r
+                for r in raw_runners
+            }
 
             ranked = sorted(
-                [(to_float(r.get("rpr")), r.get("horse","").lower()) for r in card_runners
+                [(to_float(r.get("rpr")), r.get("horse","").split(" (")[0].strip().lower())
+                 for r in card_runners
                  if to_float(r.get("rpr")) and to_float(r.get("rpr")) > 0],
                 reverse=True
             )
