@@ -1053,9 +1053,9 @@ for race in races_all:
             cs["avg_sp"].append(sp)
     if not valid:
         continue
-    valid.sort()
+    valid.sort(key=lambda x: x[0])
     fav_sp, fav_pos = valid[0]
-    if fav_pos == 1:          cs["fav_win"] += 1
+    if fav_pos == 1:              cs["fav_win"] += 1
     if fav_pos and fav_pos <= ps: cs["fav_plc"] += 1
 
 top_courses = sorted(course_stats.items(), key=lambda x: -x[1]["n"])[:15]
@@ -1093,9 +1093,9 @@ for race in races_all:
     if not valid:
         continue
     cs["sps"].extend(sp for sp,_ in valid)
-    valid.sort()
+    valid.sort(key=lambda x: x[0])
     fsp, fp = valid[0]
-    if fp == 1:        cs["fav_win"] += 1
+    if fp == 1:         cs["fav_win"] += 1
     if fp and fp <= ps: cs["fav_plc"] += 1
 
 print(f"  {'Class':<8} {'Races':>6} {'AvgField':>9} {'AvgSP':>7} {'FavWin%':>9} {'FavPlc%':>9}")
@@ -1134,7 +1134,7 @@ for date in sorted(set(r["_date"] for r in races_all)):
         if not valid:
             continue
         all_sps.extend(sp for sp,_ in valid)
-        valid.sort()
+        valid.sort(key=lambda x: x[0])
         fsp, fpos = valid[0]
         ft += 1
         if fpos == 1:         fw  += 1
