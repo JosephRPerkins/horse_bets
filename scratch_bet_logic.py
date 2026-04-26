@@ -496,10 +496,11 @@ for e in expensive:
     if len(s["examples"]) < 3:
         r = e["rec"]
         p1 = (r["cur_p1"] or {}).get("horse","?")
+        sp_str = f"{r['cur_p1_sp']:.1f}" if r["cur_p1_sp"] else "?"
+        tc_str = TIER_C_LABELS.get(r["tier_c"],"?")
         s["examples"].append(
             f"{r['date']} {r['race'].get('course','?')} {r['race'].get('off','')} "
-            f"P1={p1[:16]} SP={r['cur_p1_sp']:.1f if r['cur_p1_sp'] else '?'} "
-            f"tier_c={TIER_C_LABELS.get(r['tier_c'],'?')}"
+            f"P1={p1[:16]} SP={sp_str} tier_c={tc_str}"
         )
 
 print(f"  {'Decision type':<45} {'N':>5} {'Total cost':>12}")
