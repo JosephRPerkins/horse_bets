@@ -732,6 +732,61 @@ print("╚═══════════════════════�
 print()
 print(f"  Dataset: {len(races_all)} races across {len(set(r['_date'] for r in races_all))} days\n")
 
+# ── Data quality audit ────────────────────────────────────────────────────────
+NULL_VALS = {"", "-", "--", "None", "none"}
+NUMERIC_FIELDS = {"rpr", "tsr", "sp_dec", "bsp"}
+
+dq_fields = ["rpr", "or", "tsr", "sp_dec", "bsp", "trainer_14d", "jockey_14d"]
+dq_by_date = {}
+for race in races_all:
+    date = race.get("_date", "?")
+    if date not in dq_by_date:
+        dq_by_date[date] = {fi: [0, 0] for fi in dq_fields}
+    for r in race.get("runners", []):
+        for field in dq_fields:
+            dq_by_date[date][field][1] += 1
+            v = r.get(field)
+            if v is None:
+                continue
+            if isinstance(v, dict):
+                if v.get("runs", 0) > 0:
+                    dq_by_date[date][field][0] += 1
+            else:
+                sv = str(v).strip()
+                if sv in NULL_VALS:
+                    continue
+                if field in NUMERIC_FIELDS:
+                    try:
+                        if float(sv) > 0:
+                            dq_by_date[date][field][0] += 1
+                    except:
+                        pass
+                else:
+                    dq_by_date[date][field][0] += 1
+
+warnings = []
+for date in sorted(dq_by_date.keys()):
+    for field in dq_fields:
+        present, total = dq_by_date[date][field]
+        pct = present / total * 100 if total else 0
+        if pct < 80 and field != "bsp":
+            warnings.append((date, field, pct, total))
+
+if warnings:
+    print("  DATA QUALITY WARNINGS (fields <80% coverage):")
+    print(f"  {'Date':12} {'Field':14} {'Coverage':>10} {'Runners':>8}")
+    print(f"  {'-'*48}")
+    for date, field, pct, total in warnings:
+        print(f"  {date:12} {field:14} {pct:>9.0f}%  {total:>8}")
+    print()
+    print("  NOTE: RPR/TSR drop to 0% from 2026-04-13 onwards in the raw results")
+    print("  endpoint. OR, trainer_14d, jockey_14d, sp_dec remain reliable throughout.")
+    print("  BSP is absent for recent dates (not yet settled). Sections using RPR")
+    print("  (B10 RPR simulation) are only reliable for pre-Apr-13 card dates.")
+    print()
+else:
+    print("  Data quality: all key fields >80% coverage across all dates.\n")
+
 # ── B1: Dataset overview ──────────────────────────────────────────────────────
 print(f"{'='*76}")
 print(f"  B1: DATASET OVERVIEW")
@@ -951,42 +1006,59 @@ print(f"  B5: TRAINER 14-DAY STRIKE RATE vs ACTUAL WIN RATE")
 print(f"{'='*76}")
 print()
 
-t14_bands = [
-    ("0%  (0/n)",  0,    0.001),
-    ("1–10%",      0.001,0.10),
-    ("10–20%",     0.10, 0.20),
-    ("20–30%",     0.20, 0.30),
-    ("30%+",       0.30, 1.01),
+def parse_form_dict(v):
+    """Extract (win_pct, ae) from a trainer/jockey 14d dict or return (None, None)."""
+    if not v:
+        return None, None
+    if isinstance(v, dict):
+        runs = v.get("runs", 0)
+        if not runs:
+            return None, None
+        return v.get("win_pct", 0), v.get("ae")
+    # Fallback: old "wins/runs" string format
+    try:
+        wins, runs = map(int, str(v).split("/"))
+        return (wins / runs if runs else 0), None
+    except:
+        return None, None
+
+form_bands = [
+    ("0%  (0/n)",  0,     0.001),
+    ("1–10%",      0.001, 0.10),
+    ("10–20%",     0.10,  0.20),
+    ("20–30%",     0.20,  0.30),
+    ("30%+",       0.30,  1.01),
 ]
-t14_stats = {b[0]: [0,0,0] for b in t14_bands}
+
+# t14_stats: [wins, places, total, ae_sum, ae_n]
+t14_stats = {b[0]: [0, 0, 0, 0.0, 0] for b in form_bands}
 
 for race in races_all:
     runners  = race.get("runners", [])
     nrunners = len(runners)
     ps       = place_spots_for(nrunners)
     for r in runners:
-        t14 = r.get("trainer_14d")
-        if not t14:
-            continue
-        try:
-            wins, runs = map(int, str(t14).split("/"))
-            rate = wins/runs if runs else 0
-        except:
+        rate, ae = parse_form_dict(r.get("trainer_14d"))
+        if rate is None:
             continue
         p = to_int(r.get("position"))
-        for label, lo, hi in t14_bands:
+        for label, lo, hi in form_bands:
             if lo <= rate < hi:
                 t14_stats[label][2] += 1
                 if p == 1:        t14_stats[label][0] += 1
                 if p and p <= ps: t14_stats[label][1] += 1
+                if ae is not None:
+                    t14_stats[label][3] += ae
+                    t14_stats[label][4] += 1
                 break
 
-print(f"  {'Trainer 14d':16} {'Runners':>8} {'Win%':>8} {'Place%':>9}")
-print(f"  {'-'*44}")
-for label, lo, hi in t14_bands:
-    w, pl, t = t14_stats[label]
+print(f"  {'Trainer 14d':16} {'Runners':>8} {'Win%':>8} {'Place%':>9} {'AvgA/E':>8}")
+print(f"  {'-'*52}")
+for label, lo, hi in form_bands:
+    w, pl, t, ae_sum, ae_n = t14_stats[label]
     if t:
-        print(f"  {label:16} {t:>8} {w/t*100:>7.1f}%  {pl/t*100:>8.1f}%")
+        avg_ae = ae_sum / ae_n if ae_n else 0
+        print(f"  {label:16} {t:>8} {w/t*100:>7.1f}%  {pl/t*100:>8.1f}%  {avg_ae:>7.2f}")
 print()
 
 # ── B6: Jockey 14-day form ────────────────────────────────────────────────────
@@ -995,36 +1067,34 @@ print(f"  B6: JOCKEY 14-DAY STRIKE RATE vs ACTUAL WIN RATE")
 print(f"{'='*76}")
 print()
 
-j14_bands = t14_bands   # same breakpoints
-j14_stats = {b[0]: [0,0,0] for b in j14_bands}
+j14_stats = {b[0]: [0, 0, 0, 0.0, 0] for b in form_bands}
 
 for race in races_all:
     runners  = race.get("runners", [])
     nrunners = len(runners)
     ps       = place_spots_for(nrunners)
     for r in runners:
-        j14 = r.get("jockey_14d")
-        if not j14:
-            continue
-        try:
-            wins, runs = map(int, str(j14).split("/"))
-            rate = wins/runs if runs else 0
-        except:
+        rate, ae = parse_form_dict(r.get("jockey_14d"))
+        if rate is None:
             continue
         p = to_int(r.get("position"))
-        for label, lo, hi in j14_bands:
+        for label, lo, hi in form_bands:
             if lo <= rate < hi:
                 j14_stats[label][2] += 1
                 if p == 1:        j14_stats[label][0] += 1
                 if p and p <= ps: j14_stats[label][1] += 1
+                if ae is not None:
+                    j14_stats[label][3] += ae
+                    j14_stats[label][4] += 1
                 break
 
-print(f"  {'Jockey 14d':16} {'Runners':>8} {'Win%':>8} {'Place%':>9}")
-print(f"  {'-'*44}")
-for label, lo, hi in j14_bands:
-    w, pl, t = j14_stats[label]
+print(f"  {'Jockey 14d':16} {'Runners':>8} {'Win%':>8} {'Place%':>9} {'AvgA/E':>8}")
+print(f"  {'-'*52}")
+for label, lo, hi in form_bands:
+    w, pl, t, ae_sum, ae_n = j14_stats[label]
     if t:
-        print(f"  {label:16} {t:>8} {w/t*100:>7.1f}%  {pl/t*100:>8.1f}%")
+        avg_ae = ae_sum / ae_n if ae_n else 0
+        print(f"  {label:16} {t:>8} {w/t*100:>7.1f}%  {pl/t*100:>8.1f}%  {avg_ae:>7.2f}")
 print()
 
 # ── B7: Course-level patterns ─────────────────────────────────────────────────
@@ -1150,6 +1220,8 @@ print()
 print(f"{'='*76}")
 print(f"  B10: RPR-RANKED PICK SIMULATION (card dates: {sorted(cards_by_date.keys())})")
 print(f"  Ranks runners by pre-race RPR, checks top-2 vs actual results.")
+print(f"  NOTE: RPR is 0% in raw results from Apr 13+, so card dates Apr 22-26")
+print(f"  will show empty results here. Only Apr 10 card has reliable RPR coverage.")
 print(f"{'='*76}")
 print()
 
