@@ -1,0 +1,829 @@
+"""
+scratch_multistage_v2.py  —  NOT part of the main bot, do not commit
+=====================================================================
+Card-sourced multistage ranking test. Four sections:
+
+  1. CARD MULTISTAGE  — score from card all_runners (rpr/ofr/ts/form),
+     join to raw results for outcomes. Sweep market_weight 0.0-1.0.
+     Includes place bet analysis using standard Betfair place terms.
+
+  2. VS CURRENT MODEL  — same card races, compare multistage P1 vs
+     card top1 (current model pick). Win rate, place rate, flat P&L.
+     Includes place bets for both.
+
+  3. RPR SUBSET  — split full history (17 days) into races where RPR
+     was available in the raw vs absent. Compare ranking success rate,
+     winner-in-top-2, and place rates. Shows what RPR adds.
+
+  4. PLACE BET DEEP DIVE  — dedicated analysis of place bet EV across
+     all three datasets (card multistage, current model, history full).
+     Betfair standard place terms: <=4 runners = no place, 5-7 = 2 places,
+     8-11 = 3 places, 12-15 = 4 places, 16+ = 4 places (handicaps).
+
+Run from ~/horse_bets_v3:
+  python3 scratch_multistage_v2.py 2>&1 | tee multistage_v2_output.txt
+"""
+
+import json, glob, os, sys
+from collections import defaultdict
+
+sys.path.insert(0, os.path.dirname(__file__))
+from predict    import score_runner
+from predict_v2 import race_confidence, TIER_LABELS
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATA LOADING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+history = {}
+for fp in sorted(glob.glob("data/history/*.json")):
+    with open(fp) as f: d = json.load(f)
+    history[d["date"]] = d
+
+raw_index = {}        # race_id -> race
+raw_by_key = {}       # (course, off_dt) -> race
+for fp in sorted(glob.glob("data/raw/*.json")):
+    with open(fp) as f: d = json.load(f)
+    date_str = os.path.basename(fp).replace(".json","")
+    for race in (d.get("results") or d.get("races") or []):
+        race["_date"] = date_str
+        raw_index[race["race_id"]] = race
+        key = (race.get("course",""), race.get("off_dt", race.get("off","")))
+        raw_by_key[key] = race
+
+cards = {}            # date -> list of card races
+for fp in sorted(glob.glob("data/cards/2026-*.json")):
+    date_str = os.path.basename(fp).replace(".json","")
+    with open(fp) as f: d = json.load(f)
+    cards[date_str] = d.get("races") or []
+
+print(f"Loaded {len(history)} days of history | "
+      f"{len(raw_index)} raw races | "
+      f"cards for {sorted(cards.keys())}")
+print()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+NULL_VALS = {"", "-", "--", "None", "none"}
+
+def to_float(v):
+    if v is None: return None
+    sv = str(v).strip()
+    if sv in NULL_VALS: return None
+    try:
+        f = float(sv)
+        return f if f > 0 else None
+    except: return None
+
+def place_spots_betfair(n, is_handicap=False):
+    """Standard Betfair place terms (not conservative)."""
+    if n <= 4:  return 1   # win only (no place market)
+    if n <= 7:  return 2
+    if n <= 11: return 3
+    return 4               # 12+ runners = 4 places
+
+def place_divisor(n):
+    if n <= 4:  return None
+    if n <= 7:  return 4.0
+    if n <= 11: return 5.0
+    return 6.0
+
+def going_family(going):
+    g = (going or "").lower()
+    if "heavy" in g:           return "heavy"
+    if "soft" in g:            return "soft"
+    if "good to soft" in g:    return "gd_soft"
+    if "good to firm" in g:    return "gd_firm"
+    if "good" in g:            return "good"
+    if "firm" in g:            return "firm"
+    if "standard" in g:        return "aw"
+    return "other"
+
+def get_form(d):
+    if not isinstance(d, dict): return 0.0, 0.0, 0
+    return d.get("win_pct",0) or 0, d.get("ae",0) or 0, d.get("runs",0) or 0
+
+def strip_country(name):
+    return (name or "").split(" (")[0].strip().lower()
+
+AE_BINS = [(2.0,5,3),(1.5,5,2),(1.0,5,1)]
+
+def ae_pts(win_pct, ae, runs):
+    if runs < 3: return 0
+    pts = 0
+    for min_ae, min_runs, p in AE_BINS:
+        if ae >= min_ae and runs >= min_runs:
+            pts = p; break
+    if win_pct >= 0.30: pts += 1
+    return pts
+
+def normalise(val, vals, scale=10.0):
+    valid = [v for v in vals if v is not None]
+    if not valid or len(valid) < 2: return scale / 2
+    lo, hi = min(valid), max(valid)
+    if hi == lo: return scale / 2
+    return ((val - lo) / (hi - lo)) * scale
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STATS SCORER  (card runner format — uses rpr/ofr/ts/placed_last_4/bad_recent)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def stats_score_card(runner, field_rprs, field_ors, field_tsrs, going):
+    score = 0.0
+    rpr = to_float(runner.get("rpr"))
+    or_ = to_float(runner.get("ofr") or runner.get("or"))
+    ts  = to_float(runner.get("ts")  or runner.get("tsr"))
+
+    if rpr: score += normalise(rpr, field_rprs, 10.0)
+    if or_: score += normalise(or_, field_ors,  10.0)
+    if ts:  score += normalise(ts,  field_tsrs,  5.0)
+    if rpr and or_ and rpr > or_: score += 2.0
+
+    # Use pre-computed form flags from card
+    fd = runner.get("form_detail") or {}
+    if isinstance(fd, dict):
+        plc4 = fd.get("placed_last_4", 0) or 0
+        bad  = fd.get("bad_recent",    0) or 0
+        if plc4 >= 3:   score += 2.0
+        elif plc4 >= 2: score += 1.0
+        if bad == 0 and runner.get("form",""):
+            score += 1.0
+
+    # Trainer / jockey
+    t_wp, t_ae, t_runs = get_form(runner.get("trainer_14d"))
+    j_wp, j_ae, j_runs = get_form(runner.get("jockey_14d"))
+    score += ae_pts(t_wp, t_ae, t_runs)
+    score += ae_pts(j_wp, j_ae, j_runs)
+
+    # Going
+    gf = going_family(going)
+    if gf in ("good","aw"): score += 1.0
+    if gf == "heavy":       score -= 2.0
+
+    return score
+
+def rank_card_runners(runners, going, market_weight):
+    """Rank card runners by blended stats+market score."""
+    n = len(runners)
+    if n < 2: return runners
+
+    field_rprs = [to_float(r.get("rpr")) for r in runners]
+    field_ors  = [to_float(r.get("ofr") or r.get("or")) for r in runners]
+    field_tsrs = [to_float(r.get("ts")  or r.get("tsr")) for r in runners]
+
+    # Stats scores and ranks
+    stats = [(stats_score_card(r, field_rprs, field_ors, field_tsrs, going), r)
+             for r in runners]
+    stats.sort(key=lambda x: -x[0])
+    stats_rank = {r.get("horse_id",""):i+1 for i,(_,r) in enumerate(stats)}
+
+    # Market ranks from sp_dec (pre-race odds from card)
+    mkt = [(to_float(r.get("sp_dec")) or 999, r) for r in runners]
+    mkt.sort(key=lambda x: x[0])
+    mkt_rank = {r.get("horse_id",""):i+1 for i,(_,r) in enumerate(mkt)}
+
+    # Combined
+    combined = []
+    for s_score, r in stats:
+        hid = r.get("horse_id","")
+        sr  = stats_rank.get(hid, n)
+        mr  = mkt_rank.get(hid, n)
+        sr_norm = (sr-1) / max(n-1,1)
+        mr_norm = (mr-1) / max(n-1,1)
+        cs = (1-market_weight)*sr_norm + market_weight*mr_norm
+        combined.append((cs, sr, mr, s_score, r))
+
+    combined.sort(key=lambda x: x[0])
+    result = []
+    for rank,(cs,sr,mr,ss,r) in enumerate(combined):
+        result.append({**r,
+            "_combined_rank": rank+1,
+            "_stats_rank":    sr,
+            "_market_rank":   mr,
+            "_stats_score":   ss,
+        })
+    return result
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 1: CARD MULTISTAGE — market weight sweep + place bets
+# ═══════════════════════════════════════════════════════════════════════════════
+
+print("╔══════════════════════════════════════════════════════════════════════════╗")
+print("║  SECTION 1: CARD MULTISTAGE — market weight sweep                       ║")
+print("║  Score from card all_runners (rpr/ofr/ts/form), outcomes from raw       ║")
+print("╚══════════════════════════════════════════════════════════════════════════╝")
+print()
+
+def evaluate_card(market_weight, agree_filter=False, max_mkt_rank=None):
+    total=p1w=p2w=p1p=p2p=skipped=0
+    p1_win_pnl=p2_win_pnl=p1_plc_pnl=p2_plc_pnl=0.0
+    gap_stats = defaultdict(lambda:{"n":0,"p1w":0,"p1p":0,"p1_plc_ev":0.0})
+
+    for date, card_races in sorted(cards.items()):
+        for card_race in card_races:
+            # Join card to raw via (course, off_dt)
+            key = (card_race.get("course",""),
+                   card_race.get("off_dt", card_race.get("off","")))
+            raw = raw_by_key.get(key)
+            if not raw: continue
+
+            runners = card_race.get("all_runners", [])
+            if len(runners) < 2: continue
+
+            ranked = rank_card_runners(runners, card_race.get("going",""), market_weight)
+            p1 = ranked[0]
+            p2 = ranked[1]
+
+            if agree_filter and p1["_stats_rank"] != 1:
+                skipped += 1; continue
+            if max_mkt_rank and p1["_market_rank"] > max_mkt_rank:
+                skipped += 1; continue
+
+            # Outcomes from raw results
+            raw_runners = raw.get("runners", [])
+            n = len(raw_runners)
+            ps  = place_spots_betfair(n)
+            div = place_divisor(n)
+
+            pos_by_horse = {strip_country(r.get("horse","")): r
+                            for r in raw_runners}
+
+            def outcome(horse_name):
+                r = pos_by_horse.get(strip_country(horse_name))
+                if not r: return None, None
+                try: p = int(str(r.get("position","")).strip())
+                except: return None, None
+                sp = to_float(r.get("sp_dec"))
+                return p, sp
+
+            p1_pos, p1_sp = outcome(p1.get("horse",""))
+            p2_pos, p2_sp = outcome(p2.get("horse",""))
+
+            if p1_pos is None: continue
+
+            p1_won  = p1_pos == 1
+            p2_won  = p2_pos == 1 if p2_pos else False
+            p1_plcd = p1_pos <= ps
+            p2_plcd = (p2_pos <= ps) if p2_pos else False
+
+            # Rank agreement bucket
+            rd = abs(p1["_stats_rank"] - p1["_market_rank"])
+            gb = "agree" if rd==0 else ("differ_1" if rd==1 else
+                 ("differ_2-3" if rd<=3 else "differ_4+"))
+            gap_stats[gb]["n"]   += 1
+            gap_stats[gb]["p1w"] += p1_won
+            gap_stats[gb]["p1p"] += p1_plcd
+
+            # Win P&L (£2 flat)
+            if p1_sp:
+                p1_win_pnl += (p1_sp-1)*2 if p1_won else -2
+            if p2_sp:
+                p2_win_pnl += (p2_sp-1)*2 if p2_won else -2
+
+            # Place P&L (£2 flat, estimated Betfair place odds)
+            if p1_sp and div:
+                est_plc = (p1_sp-1)/div + 1
+                p1_plc_pnl += (est_plc-1)*2 if p1_plcd else -2
+            if p2_sp and div:
+                est_plc = (p2_sp-1)/div + 1
+                p2_plc_pnl += (est_plc-1)*2 if p2_plcd else -2
+
+            total  += 1
+            p1w    += p1_won
+            p2w    += p2_won
+            p1p    += p1_plcd
+            p2p    += p2_plcd
+
+    return dict(total=total, skipped=skipped,
+                p1w=p1w, p2w=p2w, p1p=p1p, p2p=p2p,
+                p1_win_pnl=p1_win_pnl, p2_win_pnl=p2_win_pnl,
+                p1_plc_pnl=p1_plc_pnl, p2_plc_pnl=p2_plc_pnl,
+                gap_stats=gap_stats)
+
+# Market weight sweep
+print(f"  {'MktWt':>6} {'N':>5} {'P1win%':>8} {'P1plc%':>8} "
+      f"{'P1WinP&L':>10} {'P1PlcP&L':>10} {'P2win%':>8} {'P2plc%':>8}")
+print(f"  {'-'*74}")
+
+sweep = {}
+for mw_int in range(0,11):
+    mw = mw_int/10
+    r  = evaluate_card(mw)
+    sweep[mw] = r
+    n = r["total"]
+    if n == 0: continue
+    print(f"  {mw:>6.1f} {n:>5} "
+          f"{r['p1w']/n*100:>7.1f}% "
+          f"{r['p1p']/n*100:>7.1f}% "
+          f"{r['p1_win_pnl']:>+10.2f} "
+          f"{r['p1_plc_pnl']:>+10.2f} "
+          f"{r['p2w']/n*100:>7.1f}% "
+          f"{r['p2p']/n*100:>7.1f}%")
+print()
+
+# Rank agreement at mw=0.5
+print(f"  Rank agreement breakdown (mw=0.5):")
+print(f"  {'Agreement':14} {'N':>5} {'P1win%':>8} {'P1plc%':>8}")
+r5 = sweep[0.5]
+for gb in ["agree","differ_1","differ_2-3","differ_4+"]:
+    s = r5["gap_stats"].get(gb)
+    if s and s["n"]:
+        print(f"  {gb:14} {s['n']:>5} "
+              f"{s['p1w']/s['n']*100:>7.1f}%  "
+              f"{s['p1p']/s['n']*100:>7.1f}%")
+print()
+
+# Agree filter sweep
+print(f"  Agree filter (stats P1 == market P1):")
+print(f"  {'MktWt':>6} {'N':>5} {'Skip':>5} {'P1win%':>8} {'P1plc%':>8} "
+      f"{'WinP&L':>10} {'PlcP&L':>10}")
+print(f"  {'-'*60}")
+for mw_int in [0,3,5,7,10]:
+    mw = mw_int/10
+    r  = evaluate_card(mw, agree_filter=True)
+    n  = r["total"]
+    if n == 0: continue
+    print(f"  {mw:>6.1f} {n:>5} {r['skipped']:>5} "
+          f"{r['p1w']/n*100:>7.1f}%  "
+          f"{r['p1p']/n*100:>7.1f}%  "
+          f"{r['p1_win_pnl']:>+10.2f} "
+          f"{r['p1_plc_pnl']:>+10.2f}")
+print()
+
+# Market rank cap (pure stats)
+print(f"  Market rank cap (mw=0.0, only bet if stats P1 is top-N in market):")
+print(f"  {'Cap':>6} {'N':>5} {'Skip':>5} {'P1win%':>8} {'P1plc%':>8} "
+      f"{'WinP&L':>10} {'PlcP&L':>10}")
+print(f"  {'-'*60}")
+for cap in [1,2,3,4,5,None]:
+    r = evaluate_card(0.0, max_mkt_rank=cap)
+    n = r["total"]
+    lbl = str(cap) if cap else "all"
+    if n == 0: continue
+    print(f"  {lbl:>6} {n:>5} {r['skipped']:>5} "
+          f"{r['p1w']/n*100:>7.1f}%  "
+          f"{r['p1p']/n*100:>7.1f}%  "
+          f"{r['p1_win_pnl']:>+10.2f} "
+          f"{r['p1_plc_pnl']:>+10.2f}")
+print()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 2: VS CURRENT MODEL (card top1/top2 vs multistage P1/P2)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+print("╔══════════════════════════════════════════════════════════════════════════╗")
+print("║  SECTION 2: MULTISTAGE vs CURRENT MODEL (same card races)               ║")
+print("║  Current model = card top1/top2. Best multistage = mw=0.0 agree filter  ║")
+print("╚══════════════════════════════════════════════════════════════════════════╝")
+print()
+
+cur_total=cur_p1w=cur_p2w=cur_p1p=cur_p2p=0
+cur_p1_win_pnl=cur_p2_win_pnl=cur_p1_plc_pnl=cur_p2_plc_pnl=0.0
+
+ms_total=ms_p1w=ms_p2w=ms_p1p=ms_p2p=ms_skip=0
+ms_p1_win_pnl=ms_p2_win_pnl=ms_p1_plc_pnl=ms_p2_plc_pnl=0.0
+
+# Track per-race for direct comparison
+agree_races = []   # races where both models pick same P1
+
+for date, card_races in sorted(cards.items()):
+    for card_race in card_races:
+        key = (card_race.get("course",""),
+               card_race.get("off_dt", card_race.get("off","")))
+        raw = raw_by_key.get(key)
+        if not raw: continue
+
+        runners = card_race.get("all_runners",[])
+        if len(runners) < 2: continue
+
+        raw_runners = raw.get("runners",[])
+        n   = len(raw_runners)
+        ps  = place_spots_betfair(n)
+        div = place_divisor(n)
+
+        pos_by_horse = {strip_country(r.get("horse","")): r
+                        for r in raw_runners}
+
+        def outcome2(name):
+            r = pos_by_horse.get(strip_country(name))
+            if not r: return None, None
+            try: p = int(str(r.get("position","")).strip())
+            except: return None, None
+            return p, to_float(r.get("sp_dec"))
+
+        # Current model picks
+        top1 = card_race.get("top1") or {}
+        top2 = card_race.get("top2") or {}
+        cp1, cp1_sp = outcome2(top1.get("horse",""))
+        cp2, cp2_sp = outcome2(top2.get("horse",""))
+        if cp1 is None: continue
+
+        cp1_won  = cp1 == 1
+        cp2_won  = cp2 == 1 if cp2 else False
+        cp1_plcd = cp1 <= ps
+        cp2_plcd = (cp2 <= ps) if cp2 else False
+
+        cur_total  += 1
+        cur_p1w    += cp1_won
+        cur_p2w    += cp2_won
+        cur_p1p    += cp1_plcd
+        cur_p2p    += cp2_plcd
+        if cp1_sp:
+            cur_p1_win_pnl += (cp1_sp-1)*2 if cp1_won else -2
+            if div:
+                ep = (cp1_sp-1)/div+1
+                cur_p1_plc_pnl += (ep-1)*2 if cp1_plcd else -2
+        if cp2_sp:
+            cur_p2_win_pnl += (cp2_sp-1)*2 if cp2_won else -2
+            if div:
+                ep = (cp2_sp-1)/div+1
+                cur_p2_plc_pnl += (ep-1)*2 if cp2_plcd else -2
+
+        # Multistage (mw=0.0, no filter for fair comparison)
+        ranked = rank_card_runners(runners, card_race.get("going",""), 0.0)
+        mp1    = ranked[0]
+        mp2    = ranked[1]
+        mp1_pos, mp1_sp = outcome2(mp1.get("horse",""))
+        mp2_pos, mp2_sp = outcome2(mp2.get("horse",""))
+        if mp1_pos is None: continue
+
+        mp1_won  = mp1_pos == 1
+        mp2_won  = mp2_pos == 1 if mp2_pos else False
+        mp1_plcd = mp1_pos <= ps
+        mp2_plcd = (mp2_pos <= ps) if mp2_pos else False
+
+        ms_total  += 1
+        ms_p1w    += mp1_won
+        ms_p2w    += mp2_won
+        ms_p1p    += mp1_plcd
+        ms_p2p    += mp2_plcd
+        if mp1_sp:
+            ms_p1_win_pnl += (mp1_sp-1)*2 if mp1_won else -2
+            if div:
+                ep = (mp1_sp-1)/div+1
+                ms_p1_plc_pnl += (ep-1)*2 if mp1_plcd else -2
+        if mp2_sp:
+            ms_p2_win_pnl += (mp2_sp-1)*2 if mp2_won else -2
+            if div:
+                ep = (mp2_sp-1)/div+1
+                ms_p2_plc_pnl += (ep-1)*2 if mp2_plcd else -2
+
+        if strip_country(top1.get("horse","")) == strip_country(mp1.get("horse","")):
+            agree_races.append((cp1_won, mp1_won, cp1_plcd, mp1_plcd))
+
+header = f"  {'Model':<30} {'N':>5} {'P1win%':>8} {'P1plc%':>8} {'WinP&L':>10} {'PlcP&L':>10} {'P2win%':>8} {'P2plc%':>8}"
+print(header)
+print(f"  {'-'*82}")
+
+def print_model_row(label, n, p1w, p1p, wpl, ppl, p2w, p2p):
+    print(f"  {label:<30} {n:>5} "
+          f"{p1w/n*100:>7.1f}%  {p1p/n*100:>7.1f}%  "
+          f"{wpl:>+10.2f} {ppl:>+10.2f}  "
+          f"{p2w/n*100:>7.1f}%  {p2p/n*100:>7.1f}%")
+
+if cur_total:
+    print_model_row("Current model (card top1/top2)", cur_total,
+                    cur_p1w, cur_p1p, cur_p1_win_pnl, cur_p1_plc_pnl,
+                    cur_p2w, cur_p2p)
+if ms_total:
+    print_model_row("Multistage mw=0.0 (pure stats)", ms_total,
+                    ms_p1w, ms_p1p, ms_p1_win_pnl, ms_p1_plc_pnl,
+                    ms_p2w, ms_p2p)
+
+# Best filtered multistage
+bf = evaluate_card(0.0, agree_filter=True)
+n  = bf["total"]
+if n:
+    print_model_row("Multistage mw=0.0 agree filter", n,
+                    bf["p1w"], bf["p1p"], bf["p1_win_pnl"], bf["p1_plc_pnl"],
+                    bf["p2w"], bf["p2p"])
+
+print()
+print(f"  Races where both models pick same P1: {len(agree_races)}/{ms_total}")
+if agree_races:
+    aw = sum(1 for r in agree_races if r[0])
+    ap = sum(1 for r in agree_races if r[2])
+    n  = len(agree_races)
+    print(f"  On those races — P1 win rate: {aw}/{n} ({aw/n*100:.1f}%)  "
+          f"P1 place rate: {ap}/{n} ({ap/n*100:.1f}%)")
+print()
+
+# Direct head-to-head on races where they disagree
+disagree = []
+for date, card_races in sorted(cards.items()):
+    for card_race in card_races:
+        key = (card_race.get("course",""),
+               card_race.get("off_dt", card_race.get("off","")))
+        raw = raw_by_key.get(key)
+        if not raw: continue
+        runners = card_race.get("all_runners",[])
+        if len(runners) < 2: continue
+        raw_runners = raw.get("runners",[])
+        n   = len(raw_runners)
+        ps  = place_spots_betfair(n)
+        pos_by_horse = {strip_country(r.get("horse","")): r for r in raw_runners}
+        def o(name):
+            r = pos_by_horse.get(strip_country(name))
+            if not r: return None
+            try: return int(str(r.get("position","")).strip())
+            except: return None
+        top1 = card_race.get("top1") or {}
+        ranked = rank_card_runners(runners, card_race.get("going",""), 0.0)
+        mp1 = ranked[0]
+        if strip_country(top1.get("horse","")) == strip_country(mp1.get("horse","")): continue
+        cp = o(top1.get("horse",""))
+        mp = o(mp1.get("horse",""))
+        if cp is None or mp is None: continue
+        disagree.append((cp==1, mp==1, cp<=ps, mp<=ps, top1.get("horse",""), mp1.get("horse",""),
+                         next((r.get("horse") for r in raw_runners if str(r.get("position",""))=="1"), "?")))
+
+if disagree:
+    dw_cur = sum(1 for d in disagree if d[0])
+    dw_ms  = sum(1 for d in disagree if d[1])
+    dp_cur = sum(1 for d in disagree if d[2])
+    dp_ms  = sum(1 for d in disagree if d[3])
+    nd = len(disagree)
+    print(f"  Disagreement races ({nd}): current right={dw_cur} ({dw_cur/nd*100:.1f}%)  "
+          f"multistage right={dw_ms} ({dw_ms/nd*100:.1f}%)")
+    print(f"  Place:              current placed={dp_cur} ({dp_cur/nd*100:.1f}%)  "
+          f"multistage placed={dp_ms} ({dp_ms/nd*100:.1f}%)")
+    print()
+    print(f"  {'Date-like':5} {'Current P1':22} {'Multistage P1':22} {'Winner':22}")
+    print(f"  {'-'*72}")
+    for d in disagree[:15]:
+        mark_c = "✓" if d[0] else " "
+        mark_m = "✓" if d[1] else " "
+        print(f"  {mark_c} {d[4][:20]:22} {mark_m} {d[5][:20]:22} {d[6][:20]:22}")
+print()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 3: RPR SUBSET — full history split by RPR availability
+# ═══════════════════════════════════════════════════════════════════════════════
+
+print("╔══════════════════════════════════════════════════════════════════════════╗")
+print("║  SECTION 3: RPR AVAILABILITY SUBSET (full 17-day history)               ║")
+print("║  Splits history races into RPR-present vs RPR-absent in raw results     ║")
+print("╚══════════════════════════════════════════════════════════════════════════╝")
+print()
+
+rpr_yes = {"n":0,"cur_p1w":0,"cur_p1p":0,"cur_top2":0,
+           "ms_p1w":0,"ms_p1p":0,"ms_top2":0}
+rpr_no  = {"n":0,"cur_p1w":0,"cur_p1p":0,"cur_top2":0,
+           "ms_p1w":0,"ms_p1p":0,"ms_top2":0}
+
+for date, day in sorted(history.items()):
+    for rec in day.get("races",[]):
+        raw = raw_index.get(rec["race_id"])
+        if not raw: continue
+        runners = raw.get("runners",[])
+        if len(runners) < 2: continue
+
+        n  = len(runners)
+        ps = place_spots_betfair(n)
+
+        # Check RPR availability in this race
+        field_rprs = [to_float(r.get("rpr")) for r in runners]
+        rpr_avail  = sum(1 for v in field_rprs if v) / len(runners) >= 0.5
+
+        # Current model outcome (from history rec)
+        cur_p1_won  = rec.get("a_pos") == 1
+        cur_p1_plcd = bool(rec.get("std_a") or rec.get("cons_a"))
+
+        # Check if winner is in current model top-2
+        cur_top2 = rec.get("a_pos") in (1,2) or rec.get("b_pos") in (1,2)
+        # More precisely — winner rank in current model scoring
+        scored_cur = sorted(
+            [{**r, "_s": score_runner(r)[0]} for r in runners],
+            key=lambda x: -x["_s"]
+        )
+        winner_horse = next((r.get("horse","") for r in runners
+                             if str(r.get("position",""))=="1"), None)
+        cur_winner_rank = next((i+1 for i,r in enumerate(scored_cur)
+                                if r.get("horse","") == winner_horse), None)
+
+        # Multistage (stats-only, no SP from raw)
+        field_ors  = [to_float(r.get("or")) for r in runners]
+        field_tsrs = [to_float(r.get("tsr")) for r in runners]
+        going = raw.get("going","")
+        ms_scored = []
+        for r in runners:
+            rpr = to_float(r.get("rpr"))
+            or_ = to_float(r.get("or"))
+            ts  = to_float(r.get("tsr"))
+            s   = 0.0
+            if rpr: s += normalise(rpr, field_rprs, 10)
+            if or_: s += normalise(or_, field_ors,  10)
+            if ts:  s += normalise(ts,  field_tsrs,  5)
+            if rpr and or_ and rpr > or_: s += 2
+            t_wp,t_ae,t_runs = get_form(r.get("trainer_14d"))
+            j_wp,j_ae,j_runs = get_form(r.get("jockey_14d"))
+            s += ae_pts(t_wp,t_ae,t_runs)
+            s += ae_pts(j_wp,j_ae,j_runs)
+            ms_scored.append((s, r))
+        ms_scored.sort(key=lambda x: -x[0])
+        ms_p1      = ms_scored[0][1]
+        ms_p1_pos  = ms_p1.get("position")
+        try: ms_p1_pos = int(str(ms_p1_pos).strip())
+        except: ms_p1_pos = None
+        ms_p1_won  = ms_p1_pos == 1
+        ms_p1_plcd = ms_p1_pos is not None and ms_p1_pos <= ps
+        ms_winner_rank = next((i+1 for i,(s,r) in enumerate(ms_scored)
+                               if r.get("horse","") == winner_horse), None)
+
+        bucket = rpr_yes if rpr_avail else rpr_no
+        bucket["n"]        += 1
+        bucket["cur_p1w"]  += cur_p1_won
+        bucket["cur_p1p"]  += cur_p1_plcd
+        bucket["cur_top2"] += (cur_winner_rank or 99) <= 2
+        bucket["ms_p1w"]   += ms_p1_won
+        bucket["ms_p1p"]   += ms_p1_plcd
+        bucket["ms_top2"]  += (ms_winner_rank or 99) <= 2
+
+print(f"  {'Metric':<28} {'RPR available':>15} {'RPR absent':>14}")
+print(f"  {'-'*58}")
+ra, rn = rpr_yes, rpr_no
+na, nn = ra["n"], rn["n"]
+
+def pct(num, den): return f"{num/den*100:.1f}%" if den else "n/a"
+
+rows = [
+    ("Races",                       na,              nn,              False),
+    ("Current P1 win%",             ra["cur_p1w"],   rn["cur_p1w"],   True),
+    ("Current P1 place%",           ra["cur_p1p"],   rn["cur_p1p"],   True),
+    ("Current winner in top-2%",    ra["cur_top2"],  rn["cur_top2"],  True),
+    ("Multistage P1 win%",          ra["ms_p1w"],    rn["ms_p1w"],    True),
+    ("Multistage P1 place%",        ra["ms_p1p"],    rn["ms_p1p"],    True),
+    ("Multistage winner in top-2%", ra["ms_top2"],   rn["ms_top2"],   True),
+]
+for label, va, vn, as_pct in rows:
+    if as_pct:
+        print(f"  {label:<28} {pct(va,na):>15} {pct(vn,nn):>14}")
+    else:
+        print(f"  {label:<28} {va:>15} {vn:>14}")
+print()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 4: PLACE BET DEEP DIVE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+print("╔══════════════════════════════════════════════════════════════════════════╗")
+print("║  SECTION 4: PLACE BET DEEP DIVE                                         ║")
+print("║  Betfair standard: <=4=win only, 5-7=2plc, 8-11=3plc, 12+=4plc         ║")
+print("║  Est. place odds = (win_sp - 1) / divisor + 1                           ║")
+print("╚══════════════════════════════════════════════════════════════════════════╝")
+print()
+
+# Place EV by field size band — three datasets
+def place_ev_by_field(races_iter):
+    """
+    races_iter yields (p1_sp, p1_placed, n_runners) tuples.
+    Returns dict: field_band -> {n, plc_rate, avg_win_ev, avg_plc_ev}
+    """
+    bands = {}
+    for p1_sp, p1_placed, p1_won, n in races_iter:
+        if n <= 4: continue   # no place market
+        div = place_divisor(n)
+        if not div or not p1_sp: continue
+        if n <= 7:    fb = "5-7 (2 places)"
+        elif n <= 11: fb = "8-11 (3 places)"
+        else:         fb = "12+ (4 places)"
+        if fb not in bands:
+            bands[fb] = {"n":0,"plc":0,"win_ev":0.0,"plc_ev":0.0}
+        b = bands[fb]
+        b["n"]      += 1
+        b["plc"]    += p1_placed
+        b["win_ev"] += (p1_sp-1)*2 if p1_won else -2
+        b["plc_ev"] += ((p1_sp-1)/div)*2 if p1_placed else -2
+    return bands
+
+def print_place_table(title, bands):
+    print(f"  {title}")
+    print(f"  {'Band':<18} {'N':>5} {'PlcRate%':>9} {'AvgWinEV':>10} {'AvgPlcEV':>10} {'PlcBetter?':>11}")
+    print(f"  {'-'*66}")
+    for fb in ["5-7 (2 places)","8-11 (3 places)","12+ (4 places)"]:
+        b = bands.get(fb)
+        if not b or b["n"]==0: continue
+        avg_win = b["win_ev"] / b["n"]
+        avg_plc = b["plc_ev"] / b["n"]
+        plc_rt  = b["plc"]   / b["n"] * 100
+        better  = "YES" if avg_plc > avg_win else "no"
+        print(f"  {fb:<18} {b['n']:>5} {plc_rt:>8.1f}%  {avg_win:>10.3f}  {avg_plc:>10.3f}  {better:>11}")
+    print()
+
+# Dataset A: card multistage P1 (mw=0.0)
+def iter_card_ms():
+    for date, card_races in sorted(cards.items()):
+        for card_race in card_races:
+            key = (card_race.get("course",""),
+                   card_race.get("off_dt", card_race.get("off","")))
+            raw = raw_by_key.get(key)
+            if not raw: continue
+            runners = card_race.get("all_runners",[])
+            if len(runners) < 2: continue
+            ranked = rank_card_runners(runners, card_race.get("going",""), 0.0)
+            p1 = ranked[0]
+            raw_runners = raw.get("runners",[])
+            n = len(raw_runners)
+            pos_by_horse = {strip_country(r.get("horse","")): r for r in raw_runners}
+            r = pos_by_horse.get(strip_country(p1.get("horse","")))
+            if not r: continue
+            try: pos = int(str(r.get("position","")).strip())
+            except: continue
+            sp = to_float(r.get("sp_dec"))
+            if not sp: continue
+            ps = place_spots_betfair(n)
+            yield sp, pos <= ps, pos == 1, n
+
+# Dataset B: card current model (top1)
+def iter_card_cur():
+    for date, card_races in sorted(cards.items()):
+        for card_race in card_races:
+            key = (card_race.get("course",""),
+                   card_race.get("off_dt", card_race.get("off","")))
+            raw = raw_by_key.get(key)
+            if not raw: continue
+            top1 = card_race.get("top1") or {}
+            if not top1: continue
+            raw_runners = raw.get("runners",[])
+            n = len(raw_runners)
+            pos_by_horse = {strip_country(r.get("horse","")): r for r in raw_runners}
+            r = pos_by_horse.get(strip_country(top1.get("horse","")))
+            if not r: continue
+            try: pos = int(str(r.get("position","")).strip())
+            except: continue
+            sp = to_float(r.get("sp_dec"))
+            if not sp: continue
+            ps = place_spots_betfair(n)
+            yield sp, pos <= ps, pos == 1, n
+
+# Dataset C: full history current model (uses BSP from raw)
+def iter_history_cur():
+    for date, day in sorted(history.items()):
+        for rec in day.get("races",[]):
+            raw = raw_index.get(rec["race_id"])
+            if not raw: continue
+            runners = raw.get("runners",[])
+            n = len(runners)
+            # Find P1 runner (current model top pick = highest score_runner)
+            if not runners: continue
+            scored = sorted([{**r,"_s":score_runner(r)[0]} for r in runners],
+                            key=lambda x:-x["_s"])
+            p1 = scored[0]
+            sp = to_float(p1.get("sp_dec")) or to_float(p1.get("bsp"))
+            if not sp: continue
+            try: pos = int(str(p1.get("position","")).strip())
+            except: continue
+            ps = place_spots_betfair(n)
+            p1_plcd = bool(rec.get("std_a") or rec.get("cons_a"))
+            yield sp, p1_plcd, pos==1, n
+
+print_place_table("A: Card multistage P1 (mw=0.0) — 5 card dates",
+                  place_ev_by_field(iter_card_ms()))
+print_place_table("B: Card current model (top1) — 5 card dates",
+                  place_ev_by_field(iter_card_cur()))
+print_place_table("C: Full history current model — 17 days (uses BSP)",
+                  place_ev_by_field(iter_history_cur()))
+
+# Place EV by tier — full history
+print("  Place EV by tier (full history, current model, uses BSP):")
+print(f"  {'Tier':<10} {'N':>5} {'PlcRate%':>9} {'AvgWinEV':>10} {'AvgPlcEV':>10} {'PlcBetter?':>11}")
+print(f"  {'-'*58}")
+
+tier_plc = defaultdict(lambda:{"n":0,"plc":0,"win_ev":0.0,"plc_ev":0.0})
+for date, day in sorted(history.items()):
+    for rec in day.get("races",[]):
+        raw = raw_index.get(rec["race_id"])
+        if not raw: continue
+        runners = raw.get("runners",[])
+        if len(runners) < 2: continue
+        n   = len(runners)
+        div = place_divisor(n)
+        if not div: continue
+        scored = sorted([{**r,"_s":score_runner(r)[0]} for r in runners],
+                        key=lambda x:-x["_s"])
+        raw2  = {**raw,"runners":scored}
+        tier,_ = race_confidence(raw2, scored[0]["_s"])
+        label  = TIER_LABELS.get(tier,"?").split()[0]
+        sp = to_float(scored[0].get("sp_dec")) or to_float(scored[0].get("bsp"))
+        if not sp: continue
+        p1_won  = rec.get("a_pos") == 1
+        p1_plcd = bool(rec.get("std_a") or rec.get("cons_a"))
+        b = tier_plc[label]
+        b["n"]      += 1
+        b["plc"]    += p1_plcd
+        b["win_ev"] += (sp-1)*2 if p1_won else -2
+        b["plc_ev"] += ((sp-1)/div)*2 if p1_plcd else -2
+
+for label in ["🔥🔥🔥","🔥🔥","🔥","·","✗"]:
+    b = tier_plc.get(label)
+    if not b or b["n"]==0: continue
+    avg_win = b["win_ev"]/b["n"]
+    avg_plc = b["plc_ev"]/b["n"]
+    plc_rt  = b["plc"]/b["n"]*100
+    better  = "YES" if avg_plc > avg_win else "no"
+    print(f"  {label:<10} {b['n']:>5} {plc_rt:>8.1f}%  {avg_win:>10.3f}  {avg_plc:>10.3f}  {better:>11}")
+
+print()
+print("Done.")
