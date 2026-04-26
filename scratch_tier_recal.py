@@ -214,7 +214,8 @@ def tier_C_market_relative(card_race):
     # Market ranks
     mkt_scored = sorted(
         [(to_float(r.get("sp_dec")) or 999, i, r)
-         for i,r in enumerate(runners)]
+         for i,r in enumerate(runners)],
+        key=lambda x: x[0]
     )
     mkt_rank = {r.get("horse_id","_"+str(i)): rank+1
                 for rank,(sp,i,r) in enumerate(mkt_scored)}
@@ -622,10 +623,11 @@ def tier_C_raw(runners, race_meta):
 
     # Market ranks by sp_dec
     mkt_scored = sorted(
-        [(to_float(r.get("sp_dec")) or 999, r) for r in runners]
+        [(to_float(r.get("sp_dec")) or 999, i, r) for i,r in enumerate(runners)],
+        key=lambda x: x[0]
     )
-    mkt_rank = {r.get("horse_id","_"+str(i)): i+1
-                for i,(_,r) in enumerate(mkt_scored)}
+    mkt_rank = {r.get("horse_id","_"+str(i)): rank+1
+                for rank,(_,i,r) in enumerate(mkt_scored)}
 
     # P1 by blended rank (mw=0.6)
     blended = []
