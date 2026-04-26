@@ -235,6 +235,13 @@ for date, day in sorted(history.items()):
         raw2 = {**raw, "runners": cur_scored}
         cur_tier, _ = race_confidence(raw2, cur_scored[0]["_s"] if cur_scored else 0)
 
+        # Parse dist_f to float for attrition check
+        raw_dist_f = raw.get("dist_f","") or ""
+        try:
+            dist_f_float = float(str(raw_dist_f).replace("f","").strip())
+        except:
+            dist_f_float = 0.0
+
         race_dict = {
             **raw,
             "tier":        cur_tier,
@@ -242,6 +249,7 @@ for date, day in sorted(history.items()):
             "top1":        cur_p1,
             "top2":        cur_p2,
             "all_runners": runners,
+            "dist_f":      dist_f_float,
         }
 
         qualifies_flag = qualifies(race_dict)
