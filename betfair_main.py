@@ -423,6 +423,13 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
         milestone_alerts = update_cumulative_profit(state, combined_pnl)
         for alert in milestone_alerts:
             send(alert)
+        # Update per-tier profit pot
+        from betfair.state import update_tier_profit
+        race_tier = race.get("tier")
+        if race_tier is not None:
+            tier_alerts = update_tier_profit(state, race_tier, combined_pnl)
+            for alert in tier_alerts:
+                send(alert)
 
     if total_pnl + place_pnl < 0:
         icon = "❌"
