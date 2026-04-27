@@ -1157,11 +1157,38 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
 
 def bet_job(race: dict, state: dict):
     from betfair.commands import is_betting_allowed
+    from predict_v2 import get_blended_picks, TIER_LABELS
+    from predict import is_non_runner
+
+    # ── Re-pick from active runners at bet time ───────────────────────────────
+    # Removes non-runners and re-runs System C blended picks so top1/top2
+    # are always from the live active field, not stale card data.
+    all_runners = race.get("all_runners") or []
+    active      = [r for r in all_runners if not is_non_runner(r)]
+    if active and len(active) >= 2:
+        raw_meta = {
+            "class":   race.get("race_class") or race.get("class", ""),
+            "surface": race.get("surface", "Turf"),
+            "type":    race.get("type", "Unknown"),
+        }
+        new_tier, new_p1, new_p2, new_reasons = get_blended_picks(
+            active, mw_p1=0.60, mw_p2=0.40, raw_race=raw_meta
+        )
+        if new_p1:
+            race = {
+                **race,
+                "tier":         new_tier,
+                "tier_label":   TIER_LABELS.get(new_tier, "·   STANDARD"),
+                "tier_reasons": new_reasons,
+                "top1":         new_p1,
+                "top2":         new_p2,
+                "all_runners":  active,
+            }
+
     tier = race.get("tier", 0)
     if not is_betting_allowed(state, tier):
         logger.info(f"Paused - skipping {race.get('off')} {race.get('course')}")
         return
-
     now_utc = datetime.now(timezone.utc)
     off_utc = _to_utc(race.get("off_dt", ""))
     if off_utc and now_utc >= off_utc:
@@ -1170,7 +1197,6 @@ def bet_job(race: dict, state: dict):
             f"Race already started at job fire time."
         )
         return
-
     mode = state.get("mode", "paper")
     if mode == "live":
         _live_bet_job(race, state)
