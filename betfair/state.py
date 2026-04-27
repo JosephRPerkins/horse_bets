@@ -15,6 +15,12 @@ Balance-driven staking (live mode):
 Circuit breaker:
   Percentage-based — triggers if profit drops below 50% of day's starting pot
   within a rolling 10-race window.
+
+Per-tier profit pots (System C):
+  Each tier (ELITE/STRONG/GOOD) tracks its own cumulative profit independently.
+  Stakes scale per-tier so a STRONG winning streak doesn't inflate GOOD stakes.
+  Keys are string versions of tier integers: "4"=ELITE, "3"=STRONG, "2"=GOOD.
+  Tier pots persist across daily resets — they only reset on manual command.
 """
 
 import json
@@ -55,6 +61,19 @@ def _empty() -> dict:
         "streak_wins":         0,
         "streak_best":         0,
         "streak_peak_stake":   2.0,
+        # ── Per-tier independent profit pots (System C) ──────────────────────
+        # Each tier scales stakes from its own pot independently.
+        # Keys are string versions of tier integers: "4"=ELITE, "3"=STRONG, "2"=GOOD
+        "tier_profit": {
+            "4": 0.0,   # ELITE
+            "3": 0.0,   # STRONG
+            "2": 0.0,   # GOOD
+        },
+        "tier_profit_milestone": {
+            "4": 0.0,
+            "3": 0.0,
+            "2": 0.0,
+        },
     }
 
 
@@ -90,6 +109,9 @@ def reset_daily(state: dict) -> dict:
 
     In paper mode:
       - Falls back to cumulative_profit banking logic
+
+    NOTE: tier_profit pots are NOT reset on daily reset — they persist across
+    days so that stake scaling accumulates over the full paper/live run.
     """
     state["last_date"]        = date.today().strftime("%Y-%m-%d")
     state["daily_pnl"]        = 0.0
@@ -162,11 +184,109 @@ def reset_daily(state: dict) -> dict:
     return state
 
 
+# ── Per-tier profit tracking (System C) ───────────────────────────────────────
+
+def get_tier_profit(state: dict, tier: int) -> float:
+    """Return cumulative profit for a specific tier pot."""
+    return state.get("tier_profit", {}).get(str(tier), 0.0)
+
+
+def update_tier_profit(state: dict, tier: int, pnl: float) -> list:
+    """
+    Add pnl to this tier's independent profit pot.
+    Returns list of Telegram alert strings if a stake threshold is crossed.
+    Called after each race settles — pass the race's tier and combined P&L.
+
+    Alerts fire when:
+      - Profit crosses a step-up threshold (stake increases)
+      - Profit drops back below a threshold (stake decreases)
+    """
+    from betfair.strategy import TIER_STAKE_THRESHOLDS, get_stake
+
+    key  = str(tier)
+    pots = state.setdefault("tier_profit", {"4": 0.0, "3": 0.0, "2": 0.0})
+    prev    = pots.get(key, 0.0)
+    updated = round(prev + pnl, 2)
+    pots[key] = updated
+    state["tier_profit"] = pots
+
+    tier_names = {4: "ELITE", 3: "STRONG", 2: "GOOD"}
+    tname      = tier_names.get(tier, f"Tier {tier}")
+    thresholds = TIER_STAKE_THRESHOLDS.get(tier, [])
+    alerts     = []
+
+    # Step-up: profit crossed a threshold upward
+    for min_profit, new_stake in thresholds:
+        if prev < min_profit <= updated:
+            alerts.append(
+                f"📈 <b>{tname} stake → £{new_stake:.0f}</b>\n"
+                f"{tname} pot: £{updated:.2f}\n"
+                f"Threshold crossed: £{min_profit:.0f}"
+            )
+
+    # Step-down: profit dropped back below a threshold
+    if not alerts:
+        for min_profit, new_stake in reversed(thresholds):
+            if prev >= min_profit > updated:
+                # Find the stake that now applies
+                current_stake = get_stake(updated, tier)
+                alerts.append(
+                    f"📉 <b>{tname} stake → £{current_stake:.0f}</b>\n"
+                    f"{tname} pot: £{updated:.2f}\n"
+                    f"Dropped below: £{min_profit:.0f}"
+                )
+                break
+
+    save(state)
+    return alerts
+
+
+def reset_tier_profits(state: dict) -> dict:
+    """
+    Reset all tier profit pots to zero.
+    NOT called automatically — only via /resetpots Telegram command
+    or manual intervention. Tier pots persist across daily resets.
+    """
+    state["tier_profit"] = {"4": 0.0, "3": 0.0, "2": 0.0}
+    state["tier_profit_milestone"] = {"4": 0.0, "3": 0.0, "2": 0.0}
+    save(state)
+    logger.info("Tier profit pots reset to zero")
+    return state
+
+
+def tier_profit_summary(state: dict) -> str:
+    """
+    Return a formatted string showing all tier pot balances and current stakes.
+    Used in Telegram status messages.
+    """
+    from betfair.strategy import get_stake, next_tier_threshold, TIER_STAKE_THRESHOLDS
+    from predict_v2 import TIER_ELITE, TIER_STRONG, TIER_GOOD
+
+    pots   = state.get("tier_profit", {})
+    lines  = ["<b>Tier profit pots:</b>"]
+    labels = {TIER_ELITE: "💎 ELITE", TIER_STRONG: "🔥 STRONG", TIER_GOOD: "✓ GOOD"}
+
+    for tc in (TIER_ELITE, TIER_STRONG, TIER_GOOD):
+        profit = pots.get(str(tc), 0.0)
+        stake  = get_stake(profit, tc)
+        nxt    = next_tier_threshold(profit, tc)
+        sign   = "+" if profit >= 0 else ""
+        lines.append(
+            f"  {labels[tc]}: {sign}£{profit:.2f}  "
+            f"(stake £{stake:.0f}, next tier @ £{nxt:.0f})"
+        )
+
+    return "\n".join(lines)
+
+
+# ── Combined profit tracking (existing) ───────────────────────────────────────
+
 def update_cumulative_profit(state: dict, pnl: float) -> list:
     """
     Add pnl to cumulative_profit and check for milestone notifications.
     Returns list of Telegram notification strings (empty if no milestone).
-    Called after each race settles.
+    Called after each race settles — tracks combined daily/overall P&L
+    separately from per-tier pots.
     """
     prev    = state.get("cumulative_profit", 0.0)
     updated = round(prev + pnl, 2)
