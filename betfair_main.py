@@ -1355,7 +1355,7 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             p2_note    = " (solo P1)" if (b_price and b_price is not None and b_price < MIN_PICK2_PRICE) else ""
             place_note = " 📍" if (s_a == 0 and s_b == 0) else ""
             lines.append(
-                f"{badge} <b>{r.get('off','?')} {r.get('course','?')}</b>{tsr_m}"
+                f"{badge} <b>{r.get('off','?')} {r.get('course','?')}</b>"
                 f" [bet@{bet_at}]{place_note}\n"
                 f"  ⭐ {top1.get('horse','?')} ({top1.get('sp','?')}){p1_note} £{s_a:.2f} | "
                 f"🔵 {top2.get('horse','?')} ({top2.get('sp','?')}){p2_note} £{s_b:.2f}"
