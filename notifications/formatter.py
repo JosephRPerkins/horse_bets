@@ -10,19 +10,20 @@ Message types:
   3. result_notification — after race settles, full result with incident codes
   4. end_of_day_summary  — full day record, tier breakdown
 
-Confidence tiers (from predict_v2.py):
-  🔥🔥🔥 SUPREME   — TSR solo trigger (93% win)
-  🔥🔥  STRONG    — Score ≥7 + right conditions (65%)
-  🔥    GOOD      — Score ≥6 / Class 3/4 / small field (56%)
-  ·     STANDARD  — everything else (43%)
-  ✗     SKIP      — Flat/AW low score, 12+ field non-jump, Class 1/2
+Confidence tiers (System C — market-relative):
+  💎  ELITE    — stats P1 = market P1, strong SP-free score (~67% win)
+  🔥  STRONG   — stats/market near-agreement (~49% win)
+  ✓   GOOD     — moderate agreement (~36% win)
+  ·   STANDARD — limited agreement (info only)
+  ✗   SKIP     — Class 1/2 or >12 runners
 """
 
 import re
 from datetime import datetime
 from difflib import SequenceMatcher
 
-from predict_v2 import TIER_SUPREME, TIER_STRONG, TIER_GOOD, TIER_STD, TIER_SKIP
+from predict_v2 import TIER_ELITE, TIER_STRONG, TIER_GOOD, TIER_STD, TIER_SKIP
+TIER_SUPREME = TIER_ELITE  # legacy alias
 from utils.helpers import ordinal, dec_to_fractional, runner_status_str, is_non_runner
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -44,19 +45,19 @@ DIVIDER   = "─" * 30
 THICK_DIV = "═" * 30
 
 TIER_BADGE = {
-    TIER_SUPREME: "🔥🔥🔥 SUPREME",
-    TIER_STRONG:  "🔥🔥 STRONG",
-    TIER_GOOD:    "🔥 GOOD",
-    TIER_STD:     "· STANDARD",
-    TIER_SKIP:    "✗ SKIP",
+    TIER_ELITE:  "💎 ELITE",
+    TIER_STRONG: "🔥 STRONG",
+    TIER_GOOD:   "✓ GOOD",
+    TIER_STD:    "· STANDARD",
+    TIER_SKIP:   "✗ SKIP",
 }
 
 TIER_BET_ADVICE = {
-    TIER_SUPREME: f"{WIN} WIN selection — 93% historical rate",
-    TIER_STRONG:  f"{WIN} WIN / each-way — 65% historical rate",
-    TIER_GOOD:    f"{INFO} Each-way — 56% historical rate",
-    TIER_STD:     f"{INFO} Info only — 43% avg",
-    TIER_SKIP:    f"✗ Avoid — historically weak",
+    TIER_ELITE:  f"{WIN} WIN P1+P2 + PLACE — ~67% P1 win rate",
+    TIER_STRONG: f"{WIN} WIN P1+P2 + PLACE — ~49% P1 win rate",
+    TIER_GOOD:   f"{INFO} WIN P1+P2 only — ~36% P1 win rate",
+    TIER_STD:    f"{INFO} Info only — no bet",
+    TIER_SKIP:   f"✗ Skip",
 }
 
 
@@ -74,7 +75,7 @@ def format_morning_briefing(
 
     sorted_races = sorted(analysed_races, key=lambda r: r.get("off", "99:99"))
 
-    supreme = [r for r in sorted_races if r.get("tier") == TIER_SUPREME]
+    supreme = [r for r in sorted_races if r.get("tier") == TIER_ELITE]
     strong  = [r for r in sorted_races if r.get("tier") == TIER_STRONG]
     good    = [r for r in sorted_races if r.get("tier") == TIER_GOOD]
 
@@ -125,7 +126,7 @@ def format_morning_briefing(
     lines.append(f"\n{THICK_DIV}")
     lines.append(
         f"{INFO} Alerts fire 10 mins before each race.\n"
-        f"🔥🔥🔥/🔥🔥 = strong bets | 🔥 = each-way | · = info"
+        f"💎 ELITE / 🔥 STRONG = WIN+PLACE | ✓ GOOD = WIN only | · = info"
     )
 
     return "\n".join(lines)
@@ -594,11 +595,11 @@ def format_end_of_day(
     )
 
     # Tier breakdown
-    from predict_v2 import TIER_SUPREME, TIER_STRONG, TIER_GOOD
+    from predict_v2 import TIER_ELITE, TIER_STRONG, TIER_GOOD
     tier_rows = [
-        (TIER_SUPREME, "🔥🔥🔥 Supreme"),
-        (TIER_STRONG,  "🔥🔥 Strong"),
-        (TIER_GOOD,    "🔥 Good"),
+        (TIER_ELITE,  "💎 Elite"),
+        (TIER_STRONG, "🔥 Strong"),
+        (TIER_GOOD,   "✓ Good"),
     ]
     for t, label in tier_rows:
         t_races = [r for r in paired if r.get("tier") == t]
