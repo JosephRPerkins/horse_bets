@@ -1,392 +1,227 @@
 """
 betfair/strategy.py
 
-v3 bet qualification and stake calculation.
+Bet qualification and stake calculation — System C.
 
-Winnings-driven staking:
-  Stakes are determined by cumulative NET PROFIT, not total Betfair balance.
-  Initial deposit never compounds — only actual winnings scale stakes up.
-  At zero or negative profit stakes stay at £2/horse.
+Tier-specific independent stake cascades:
+  ELITE:  £2 → £4 at £30 profit,  £4 → £6 at £60 profit
+  STRONG: £2 → £4 at £50 profit,  £4 → £6 at £100 profit
+  GOOD:   £2 → £4 at £75 profit,  £4 → £6 at £150 profit
 
-Odds-on handling by tier:
-  SUPREME  — back Pick 1 at elevated stake, Pick 2 at base if meets minimum price
-  STRONG   — skip race entirely if Pick 1 is odds-on
-  GOOD     — redirect to Pick 2 ONLY if score >= 5 AND price >= 4.0
-  STANDARD — same as GOOD
+Each tier tracks its own profit independently. A STRONG winning streak
+does not inflate GOOD stakes, and vice versa.
 
-Score gap + market agreement:
-  When score gap < 3 AND P2 is priced shorter than P1, P2 is the better bet.
-  Data: 133 races, P2 wins 23.3% vs P1 16.5%. STRONG tier confirms same pattern.
-  In this case all tiers (except SUPREME) redirect to P2 at redirect stake.
+Betting rules:
+  ELITE + STRONG: WIN P1, WIN P2, PLACE P1, PLACE P2 (8+ runners only)
+  GOOD:           WIN P1, WIN P2 only (no place bets)
+  STANDARD/WEAK:  No bet
+  SKIP:           No bet
 
-Pick 2 price gate:
-  MIN_PICK2_PRICE applies to all tiers including SUPREME.
-  For non-SUPREME races, if Pick 2 is below minimum but Pick 1 qualifies,
-  Pick 1 is backed solo (stake_pick2 = 0) rather than skipping entirely.
+No odds-on skips. No score-gap redirects. No P2 price redirects.
+P1 and P2 are always backed at the same stake when both qualify on price.
+Place bets use the same stake as win bets for that tier.
 
-Stake tiers:
-  Thresholds scaled to account for place bets (£2 win + £2 place per horse).
-  Total exposure per qualifying race ≈ £8 at base tier.
-  Thresholds raised accordingly so compounding is not triggered prematurely.
-
-Place bet stakes:
-  Scale with win stake tier (same per-horse amount).
-  Capped at £2 for GOOD/SKIP tier races (same cap as win bets).
+Minimum prices:
+  P1: 1.20 (back anything with meaningful odds)
+  P2: 2.00 (avoid backing near-certainties as value picks)
 """
 
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from predict_v2 import TIER_STRONG, TIER_SUPREME, TIER_STD, TIER_SKIP, TIER_GOOD
+from predict_v2 import (
+    TIER_ELITE, TIER_STRONG, TIER_GOOD, TIER_STD, TIER_WEAK, TIER_SKIP,
+)
 
-SKIP_SURFACES   = set()
+# ── Price gates ────────────────────────────────────────────────────────────────
+
+MIN_PICK1_PRICE = 1.20   # back P1 at almost any odds
+MIN_PICK2_PRICE = 2.00   # P2 must offer some value
+MIN_BACK_PRICE  = 1.50   # exchange minimum meaningful odds
+MIN_LIQUIDITY   = 2.00   # minimum matched volume before placing
+
+# ── Going / surface filters ────────────────────────────────────────────────────
+
 SKIP_GOING_KEYS = {"heavy", "soft to heavy", "heavy to soft"}
 
-ATTRITION_VENUES = {"fairyhouse", "cork", "punchestown", "naas", "leopardstown"}
-ATTRITION_GOING  = {"soft", "yielding to soft", "soft to heavy", "heavy"}
-ATTRITION_DIST_F = 20.0
+# Irish NH races in attrition conditions — historically unpredictable
+ATTRITION_VENUES  = {"fairyhouse", "cork", "punchestown", "naas", "leopardstown"}
+ATTRITION_GOING   = {"soft", "yielding to soft", "soft to heavy", "heavy"}
+ATTRITION_DIST_F  = 20.0
 
-MIN_PICK1_PRICE = 2.0
-MIN_PICK2_PRICE = 1.2
-#MAX_PICK2_PRICE = 20.0  # skip win bet on P2 if SP > 20/1 — poor ROI
+# ── Tier-specific stake cascades ───────────────────────────────────────────────
+# Format: [(min_profit, stake), ...]
+# Profit tracked independently per tier.
 
-MIN_PICK2_SCORE_FOR_REDIRECT = 5
-MIN_PICK2_PRICE_FOR_REDIRECT = 4.0
+TIER_STAKE_THRESHOLDS = {
+    TIER_ELITE:  [(0, 2.0), (30,  4.0), (60,  6.0)],
+    TIER_STRONG: [(0, 2.0), (50,  4.0), (100, 6.0)],
+    TIER_GOOD:   [(0, 2.0), (75,  4.0), (150, 6.0)],
+}
 
-MIN_BACK_PRICE = 1.5
-MIN_LIQUIDITY  = 2.0
+# Bet tiers — races in these tiers qualify for betting
+BET_TIERS = {TIER_ELITE, TIER_STRONG, TIER_GOOD}
 
-TIER1_CAP_TIERS = {TIER_GOOD, TIER_SKIP}
+# Place bet tiers — only ELITE and STRONG get place bets
+PLACE_BET_TIERS = {TIER_ELITE, TIER_STRONG}
 
-# Winnings-driven cascade — thresholds are cumulative PROFIT not total balance.
-# Scaled to account for place bets: total exposure per race ≈ £8 at base tier
-# (£2 win P1 + £2 win P2 + £2 place P1 + £2 place P2).
-# Format: (min_profit, per_horse_stake, redirect_single_stake)
-STAKE_TIERS = [
-    (0,    2,   4),
-    (75,   4,   8),
-    (150,  6,   12),
-]
-
-STOP_FLOOR = 0.0
+# Minimum runners for place bets (Betfair pays 3 places at 8+)
+MIN_RUNNERS_FOR_PLACE = 8
 
 
-def get_stake(profit: float) -> float:
-    """Return per-horse win stake based on cumulative NET PROFIT."""
-    if profit <= 0:
-        return 2.0
-    stake = 2.0
-    for min_profit, s, _ in STAKE_TIERS:
+def get_stake(profit: float, tier: int) -> float:
+    """
+    Return per-horse win stake based on this tier's cumulative profit.
+    Each tier has its own independent profit pot.
+    """
+    thresholds = TIER_STAKE_THRESHOLDS.get(tier, [(0, 2.0)])
+    stake = thresholds[0][1]
+    for min_profit, s in thresholds:
         if profit >= min_profit:
-            stake = float(s)
+            stake = s
     return stake
 
 
 def get_place_stake(profit: float, tier: int = TIER_STD) -> float:
     """
-    Return per-horse place stake.
-    Matches win stake but capped at £2 for GOOD/SKIP tiers.
+    Place stake equals win stake for the tier.
+    Returns 0 if tier doesn't qualify for place bets.
     """
-    if tier in TIER1_CAP_TIERS:
-        return 2.0
-    return get_stake(profit)
+    if tier not in PLACE_BET_TIERS:
+        return 0.0
+    return get_stake(profit, tier)
 
 
-def get_redirect_stake(profit: float) -> float:
-    if profit <= 0:
-        return 4.0
-    redirect = 4.0
-    for min_profit, _, r in STAKE_TIERS:
-        if profit >= min_profit:
-            redirect = float(r)
-    return redirect
+def next_tier_threshold(profit: float, tier: int) -> float:
+    """
+    Return the next profit milestone for this tier's stake to increase.
+    Returns current threshold if already at maximum.
+    """
+    thresholds = TIER_STAKE_THRESHOLDS.get(tier, [(0, 2.0)])
+    for min_profit, _ in thresholds:
+        if profit < min_profit:
+            return float(min_profit)
+    return float(thresholds[-1][0])
 
-
-def get_tsr_stake(profit: float) -> float:
-    stakes  = [float(s) for _, s, _ in STAKE_TIERS]
-    current = get_stake(profit)
-    try:
-        idx = stakes.index(current)
-        return stakes[min(idx + 1, len(stakes) - 1)]
-    except ValueError:
-        return current
 
 def min_liquidity_for_price(price: float, stake: float) -> float:
     """
-    Dynamic minimum liquidity threshold for a bet.
-    Long-odds horses need proportionally more lay-side liquidity to fill.
-    Formula: stake * (price / 5.0) capped at 4x stake, floored at MIN_LIQUIDITY.
-
-    Examples at £2 stake:
-      price 2.0  -> £2.00  (base floor)
-      price 3.0  -> £2.00  (base floor)
-      price 6.0  -> £2.40
-      price 10.0 -> £4.00
-      price 15.0 -> £6.00
-      price 20.0 -> £8.00  (cap)
-      price 50.0 -> £8.00  (cap)
+    Minimum matched volume required before placing.
+    Scales with price — higher-priced horses need more liquidity.
     """
     multiplier = min(price / 5.0, 4.0)
     return max(MIN_LIQUIDITY, round(stake * multiplier, 2))
 
-def is_tsr_trigger(race: dict) -> bool:
-    return race.get("tier") == TIER_SUPREME
 
+# ── Race qualification ─────────────────────────────────────────────────────────
 
 def _is_attrition_risk(race: dict) -> bool:
-    course     = (race.get("course") or "").lower()
-    going      = (race.get("going") or "").lower()
-    race_type  = (race.get("type") or "").lower()
-    dist_f     = race.get("dist_f") or 0.0
+    """Irish NH races in soft/heavy going at staying distances."""
+    course    = (race.get("course") or "").lower()
+    going     = (race.get("going")  or "").lower()
+    race_type = (race.get("type")   or "").lower()
+    dist_f    = race.get("dist_f")  or 0.0
+
+    try:
+        dist_f = float(str(dist_f).replace("f", "").strip())
+    except (ValueError, TypeError):
+        dist_f = 0.0
+
     is_irish   = any(v in course for v in ATTRITION_VENUES)
-    is_nh      = "hurdle" in race_type or "chase" in race_type or "nh flat" in race_type
+    is_nh      = any(t in race_type for t in ("hurdle", "chase", "nh flat"))
     is_soft    = any(g in going for g in ATTRITION_GOING)
-    is_staying = float(dist_f) >= ATTRITION_DIST_F
+    is_staying = dist_f >= ATTRITION_DIST_F
+
     return is_irish and is_nh and is_soft and is_staying
 
 
 def qualifies(race: dict) -> bool:
-    surface = race.get("surface", "")
-    going   = (race.get("going") or "").lower()
-    tier    = race.get("tier")
-    cls     = str(race.get("class") or "").strip()
+    """
+    Return True if the race passes all pre-bet filters.
 
-    if surface in SKIP_SURFACES:
-        return False
+    Filters applied:
+    - Going: skip heavy/soft-to-heavy
+    - Attrition: skip Irish NH staying races in soft ground
+    - Tier: must be ELITE, STRONG, or GOOD
+    - Picks: must have both top1 and top2 populated
+    - Field: must have runners list (for RPR check)
+    """
+    going = (race.get("going") or "").lower()
+    tier  = race.get("tier")
+
     if any(k in going for k in SKIP_GOING_KEYS):
         return False
+
     if _is_attrition_risk(race):
         return False
+
+    if tier not in BET_TIERS:
+        return False
+
     if not race.get("top1") or not race.get("top2"):
         return False
 
-    # ── SKIP tier sub-filters ─────────────────────────────────────────────────
-    # Class 2 SKIP races perform well (24W/4L) — keep betting
-    # Class 1 SKIP races are too volatile (22W/11L) — skip
-    # AW low score and large field SKIP — skip
-    if tier == TIER_SKIP:
-        if cls == "Class 1":
-            return False
-        n = len(race.get("all_runners") or race.get("runners") or [])
-        if n >= 13:
-            return False
-
     return True
 
 
-def should_back_pick1(pick1_price, tier: int = TIER_STD) -> bool:
+def should_back_pick1(pick1_price) -> bool:
+    """P1 qualifies if it meets the minimum price."""
     if not pick1_price:
         return False
-    if tier == TIER_SUPREME:
-        return pick1_price > 1.0
     return pick1_price >= MIN_PICK1_PRICE
 
 
-def should_back_pick2(pick2_price, pick1_price=None, tier: int = TIER_STD) -> bool:
-    """
-    Returns True if Pick 2 meets the price gate.
-    Dynamic check: Pick 2 must be >= 2.0 AND >= Pick 1 price * 0.4.
-    This allows short Pick 2s when Pick 1 is also shorter (relative value).
-    SUPREME: gate does not apply.
-    """
+def should_back_pick2(pick2_price) -> bool:
+    """P2 qualifies if it meets the minimum price."""
     if not pick2_price:
         return False
-    if tier == TIER_SUPREME:
-        return True
-    if pick2_price < MIN_PICK2_PRICE:
-        return False
-    if pick1_price and pick1_price < 10.0 and pick2_price < pick1_price * 0.4:
-        return False
-    return True
+    return pick2_price >= MIN_PICK2_PRICE
 
 
-def is_two_horse_race(pick1_price, pick2_price, pick3_price) -> bool:
+def should_place_bet(tier: int, n_runners: int) -> bool:
     """
-    True when market identifies an effective two-horse race.
-    Two scenarios:
-    1. Both picks short (P1 odds-on, P2 < MIN_PICK2_PRICE) and field drops away.
-    2. P1 very heavily odds-on (< 1.5) and P3 is at least 2x P2 price
-       — catches cases where P2 is viable but P1 is so short the race
-       is effectively between just two horses.
+    Place bets only on ELITE and STRONG, with 8+ runners.
+    With fewer than 8 runners Betfair pays only 2 places (5-7)
+    or win only (<=4), reducing value significantly.
     """
-    if not pick1_price or not pick2_price or not pick3_price:
-        return False
-    scenario1 = (
-        pick1_price < MIN_PICK1_PRICE
-        and pick2_price < MIN_PICK2_PRICE
-        and pick3_price >= pick2_price * 2.5
-    )
-    scenario2 = (
-        pick1_price < 1.5
-        and pick2_price >= MIN_PICK2_PRICE
-        and pick3_price >= pick2_price * 2.0
-    )
-    return scenario1 or scenario2
+    return tier in PLACE_BET_TIERS and n_runners >= MIN_RUNNERS_FOR_PLACE
 
 
-def pick_stakes(profit: float, tsr: bool,
-                pick1_price, pick2_price,
-                tier: int = TIER_STD,
-                pick2_score: int = 0,
-                pick3_price = None,
-                score_gap: int = 0) -> tuple:
+def pick_stakes(
+    profit:       float,
+    tier:         int,
+    pick1_price,
+    pick2_price,
+    n_runners:    int = 0,
+) -> tuple:
     """
-    Return (stake_pick1, stake_pick2).
+    Return (stake_p1_win, stake_p2_win, stake_place).
 
-    profit:      cumulative net profit — drives stake tier
-    pick2_score: model score for Pick 2 — gates existing redirect decisions
-    score_gap:   P1 score minus P2 score — drives market-disagreement redirect
+    profit:      this tier's cumulative net profit
+    tier:        System C tier (ELITE/STRONG/GOOD)
+    pick1_price: SP or exchange price for P1
+    pick2_price: SP or exchange price for P2
+    n_runners:   actual runners in race (for place bet gate)
 
-    Key behaviours:
-    - SUPREME: back both picks, P1 at elevated TSR stake.
-    - STRONG odds-on P1: skip entirely (0, 0)
-    - Weak gap (<3) + P2 shorter than P1: redirect to P2 (all tiers except SUPREME)
-      Data: 133 races, P2 wins 23.3% vs P1 16.5%. STRONG tier: P2 57.1% vs P1 14.3%.
-    - GOOD/SKIP: capped at £2/horse
-    - Non-SUPREME with P1 qualifying but P2 below min: backs P1 solo (s1, 0)
-    - Returns (0, 0) only when race should be skipped completely.
+    Rules:
+    - Both P1 and P2 backed at same stake if they meet price gates
+    - Place bets only on ELITE+STRONG, 8+ runners
+    - No redirects, no odds-on skips, no gap-based switching
+    - Returns (0, 0, 0) if tier doesn't qualify
     """
-    if tier in TIER1_CAP_TIERS:
-        base     = 2.0
-        redirect = 4.0
-    else:
-        base     = get_stake(profit)
-        redirect = get_redirect_stake(profit)
+    if tier not in BET_TIERS:
+        return 0.0, 0.0, 0.0
 
-    p1_qualifies = should_back_pick1(pick1_price, tier)
-    p1_odds_on   = pick1_price is not None and pick1_price < MIN_PICK1_PRICE
-    p2_ok        = should_back_pick2(pick2_price, pick1_price, tier)
+    stake = get_stake(profit, tier)
 
-    # ── SUPREME ───────────────────────────────────────────────────────────────
-    # Back both picks. P1 gets elevated TSR stake (one tier above base).
-    # P2 backed at base if it meets minimum price — same as STRONG/GOOD.
-    # Backtest: TSR solo + Turf = 93% win rate, AnyPlace% 81% — P2 adds value.
-    if tier == TIER_SUPREME:
-        s1 = get_tsr_stake(profit) if tier not in TIER1_CAP_TIERS else base
-        s2 = base if p2_ok else 0.0
-        return s1, s2
+    p1_ok = should_back_pick1(pick1_price)
+    p2_ok = should_back_pick2(pick2_price)
 
-    # ── STRONG odds-on P1: skip entirely ─────────────────────────────────────
-    if p1_odds_on and tier == TIER_STRONG:
-        return 0.0, 0.0
+    s1 = stake if p1_ok else 0.0
+    s2 = stake if p2_ok else 0.0
 
-    # ── Weak gap + market disagrees: redirect to P2 ───────────────────────────
-    # When score gap < 3 AND P2 is priced shorter than P1, P2 is the better bet.
-    # Applies to all tiers except SUPREME (handled above).
-    # 133 races: P2 wins 23.3% vs P1 16.5%.
-    # STRONG tier specifically: P2 57.1% vs P1 14.3% in this condition.
-    if (score_gap < 3
-            and pick1_price is not None
-            and pick2_price is not None
-            and pick2_price < pick1_price
-            and p2_ok):
-        return 0.0, redirect
+    # Place bets: same stake, ELITE+STRONG, 8+ runners
+    sp = stake if should_place_bet(tier, n_runners) else 0.0
 
-    # ── Normal P1 qualifies ───────────────────────────────────────────────────
-    # Back P1. Back P2 only if it meets minimum price.
-    # If P2 below minimum, back P1 solo rather than skipping race.
-    if p1_qualifies:
-        s2 = base if p2_ok else 0.0
-        return base, s2
-
-    # ── P1 odds-on for non-SUPREME/STRONG: redirect to P2 if strong ──────────
-    if p1_odds_on:
-        p2_strong = (
-            pick2_score >= MIN_PICK2_SCORE_FOR_REDIRECT
-            and pick2_price is not None
-            and pick2_price >= MIN_PICK2_PRICE_FOR_REDIRECT
-        )
-        if p2_strong:
-            return 0.0, redirect
-        return 0.0, 0.0
-
-    # ── P1 below minimum (not odds-on): redirect to P2 if strong ─────────────
-    p2_strong = (
-        pick2_score >= MIN_PICK2_SCORE_FOR_REDIRECT
-        and pick2_price is not None
-        and pick2_price >= MIN_PICK2_PRICE_FOR_REDIRECT
-    )
-    if p2_strong:
-        return 0.0, redirect
-    return 0.0, 0.0
-
-
-def apply_liquidity(stake_a: float, stake_b: float,
-                    liq_a: float, liq_b: float,
-                    redirect: bool) -> tuple:
-    if redirect:
-        actual_b = min(stake_b, liq_b)
-        if actual_b < MIN_LIQUIDITY:
-            return 0.0, 0.0, True, f"Pick 2 liquidity £{liq_b:.2f} < £{MIN_LIQUIDITY:.0f}"
-        return 0.0, actual_b, False, ""
-    else:
-        if stake_b == 0:
-            actual_a = min(stake_a, liq_a) if liq_a > 0 else stake_a
-            if actual_a < MIN_LIQUIDITY and liq_a > 0:
-                return 0.0, 0.0, True, f"Pick 1 liquidity £{liq_a:.2f} < £{MIN_LIQUIDITY:.0f}"
-            return actual_a, 0.0, False, ""
-        safe     = min(liq_a, liq_b) if liq_a > 0 and liq_b > 0 else stake_a
-        actual_a = min(stake_a, safe)
-        actual_b = min(stake_b, liq_b) if liq_b > 0 else stake_b
-        if actual_a < MIN_LIQUIDITY and (liq_a > 0 or liq_b > 0):
-            return 0.0, 0.0, True, (
-                f"Liquidity too low — P1: £{liq_a:.2f} P2: £{liq_b:.2f} "
-                f"(need >= £{MIN_LIQUIDITY:.0f})"
-            )
-        return actual_a, actual_b, False, ""
-
-
-def check_topup_alerts(balance: float, profit: float,
-                       prev_stake) -> list:
-    alerts     = []
-    curr_stake = get_stake(profit)
-    p_stake    = get_place_stake(profit)
-
-    race_cost    = (curr_stake * 2) + (p_stake * 2)
-    warning_bal  = race_cost * 3
-    critical_bal = race_cost
-
-    if balance <= 0:
-        alerts.append(
-            f"🛑 <b>Session halted</b> — balance £{balance:.2f}\n"
-            f"Top up to continue. Minimum £{curr_stake:.0f} to place a bet."
-        )
-    elif balance < critical_bal:
-        needed = warning_bal - balance
-        alerts.append(
-            f"🚨 <b>Critical: £{balance:.2f} remaining</b>\n"
-            f"Only enough for {int(balance // race_cost)} more race(s) at £{curr_stake:.0f}/horse.\n"
-            f"Top up £{needed:.2f} to reach comfortable level."
-        )
-    elif balance < warning_bal:
-        needed = warning_bal - balance
-        alerts.append(
-            f"⚠️ <b>Balance low: £{balance:.2f}</b>\n"
-            f"Enough for ~{int(balance // race_cost)} more race(s) at £{curr_stake:.0f}/horse.\n"
-            f"Consider topping up £{needed:.2f}."
-        )
-
-    if prev_stake is not None and curr_stake != prev_stake:
-        if curr_stake > prev_stake:
-            alerts.append(
-                f"📈 <b>Tier up</b> — stakes now £{curr_stake:.0f}/horse\n"
-                f"Cumulative profit: £{profit:.2f}"
-            )
-        else:
-            alerts.append(
-                f"📉 <b>Tier down</b> — stakes now £{curr_stake:.0f}/horse\n"
-                f"Cumulative profit: £{profit:.2f}"
-            )
-
-    return alerts
-
-
-def stake_display(profit: float) -> str:
-    s = get_stake(profit)
-    r = get_redirect_stake(profit)
-    p = get_place_stake(profit)
-    return (
-        f"Win: £{s:.0f}/horse | Place: £{p:.0f}/horse | "
-        f"Redirect: £{r:.0f} (P2 score>=5, 3/1+)"
-    )
+    return s1, s2, sp
