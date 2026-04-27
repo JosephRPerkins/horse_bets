@@ -1156,7 +1156,8 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
 # ── Unified bet job ───────────────────────────────────────────────────────────
 
 def bet_job(race: dict, state: dict):
-    if state.get("betting_paused", False):
+    from betfair.commands import is_betting_allowed
+    if not is_betting_allowed(state, tier):
         logger.info(f"Paused - skipping {race.get('off')} {race.get('course')}")
         return
 
