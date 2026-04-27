@@ -1,5 +1,5 @@
 {
-  "last_date": "2026-04-27",
+  "last_date": "",
   "mode": "paper",
   "muted": false,
   "betting_paused": false,
@@ -7,10 +7,11 @@
   "daily_bets": [],
   "paper_daily_pnl": 0.0,
   "paper_daily_bets": [],
-  "cumulative_profit": 43.06,
-  "profit_milestone": 50.0,
+  "cumulative_profit": 0.0,
+  "profit_milestone": 0.0,
   "paper_place_pnl": 0.0,
   "banked_profit": 0.0,
+  "day_start_pot": 0.0,
   "profit_history": [],
   "circuit_paused": false,
   "streak_active": false,
@@ -20,7 +21,14 @@
   "streak_wins": 0,
   "streak_best": 0,
   "streak_peak_stake": 2.0,
-  "_prev_tier_stake": 2.0,
-  "day_start_pot": 43.06,
-  "pending_settlements": {}
+  "tier_profit": {
+    "4": 0.0,
+    "3": 55.0,
+    "2": 0.0
+  },
+  "tier_profit_milestone": {
+    "4": 0.0,
+    "3": 0.0,
+    "2": 0.0
+  }
 }
