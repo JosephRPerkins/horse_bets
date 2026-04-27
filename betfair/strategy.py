@@ -225,3 +225,21 @@ def pick_stakes(
     sp = stake if should_place_bet(tier, n_runners) else 0.0
 
     return s1, s2, sp
+
+def apply_liquidity(
+    stake_a:  float,
+    stake_b:  float,
+    liq_a:    float,
+    liq_b:    float,
+    redirect: bool = False,) -> tuple:
+    """
+    Liquidity stub — all bets placed as BSP so liquidity checks are bypassed.
+    Always returns full stakes as placeable. Kept for compatibility with
+    betfair_main.py until a full refactor removes liquidity logic entirely.
+    Returns (actual_a, actual_b, skipped=False, reason="").
+    """
+    if stake_a == 0 and stake_b == 0:
+        return 0.0, 0.0, True, "zero stakes"
+    if redirect:
+        return 0.0, stake_b, False, ""
+    return stake_a, stake_b, False, ""
