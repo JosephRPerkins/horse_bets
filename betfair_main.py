@@ -64,7 +64,7 @@ from betfair.strategy    import (
     qualifies, get_stake, get_place_stake, pick_stakes,
     MIN_BACK_PRICE, MIN_LIQUIDITY, MIN_PICK1_PRICE, MIN_PICK2_PRICE,
     should_back_pick1, should_back_pick2, min_liquidity_for_price,
-    next_tier_threshold, BET_TIERS,
+    next_tier_threshold, BET_TIERS, apply_liquidity,
 )
 from predict_v2 import TIER_ELITE, TIER_STRONG, TIER_GOOD, TIER_STD, TIER_SKIP, TIER_LABELS
 from betfair.state       import (
