@@ -1157,6 +1157,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
 
 def bet_job(race: dict, state: dict):
     from betfair.commands import is_betting_allowed
+    tier = race.get("tier", 0)
     if not is_betting_allowed(state, tier):
         logger.info(f"Paused - skipping {race.get('off')} {race.get('course')}")
         return
