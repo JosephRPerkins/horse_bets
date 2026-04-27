@@ -968,6 +968,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
         lines.append("⚠️ No Betfair market - using RA odds")
 
     if stake_b == 0 and stake_a > 0:
+        lines.append(f"ℹ️ Pick 2 below min price — backing Pick 1 solo")
     elif actual_b < stake_b and mkt_ok and not use_bsp_b:
         lines.append(
             f"⚠️ Stake reduced £{stake_b:.0f}→£{actual_b:.0f} "
