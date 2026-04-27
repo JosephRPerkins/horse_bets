@@ -163,11 +163,9 @@ def _find_fallback_pick(race: dict, exclude_names: list, odds: dict, bf_runners:
     return None, None, None
 
 
-def _next_tier_threshold(profit: float) -> float:
-    for min_profit, _, _ in STAKE_TIERS:
-        if profit < min_profit:
-            return float(min_profit)
-    return float(STAKE_TIERS[-1][0])
+def _next_tier_threshold(profit: float, tier: int = 0) -> float:
+    from betfair.strategy import next_tier_threshold
+    return next_tier_threshold(profit, tier)
 
 
 # ── Racing API result fetcher ─────────────────────────────────────────────────
@@ -574,14 +572,11 @@ def _live_bet_job(race: dict, state: dict):
         return
     if stake_a == 0 and stake_b == 0:
         if a_live and a_live < MIN_PICK1_PRICE:
-            reason = (
-                f"Pick 1 {a_name} @ {a_live} odds-on — "
-                f"no viable redirect (P2 score {p2_sc} or price insufficient)"
-            )
+            reason = f"Pick 1 {a_name} @ {a_live} below min price"
         elif b_live and b_live < MIN_PICK2_PRICE:
             reason = f"Pick 2 {b_name} @ {b_live} below min {MIN_PICK2_PRICE}"
         else:
-            reason = f"Pick 1 {a_name} @ {a_live} below min {MIN_PICK1_PRICE} — no viable redirect"
+            reason = f"Stakes zero for {a_name} / {b_name}"
         lines.append(f"⏭️ Win bets skipped — {reason}")
         # Don't return — fall through to place bets
 
@@ -615,29 +610,19 @@ def _live_bet_job(race: dict, state: dict):
         send(f"⏭️ 💰 <b>SKIP - {race_label}</b>\n⚠️ {liq_reason}")
         return
 
-    tsr_tag    = ""
     lines = [
         f"💰 <b>LIVE BET - {race_label}</b>",
         f"{tier_label}",
-        f"Balance: £{balance:.2f} | Profit: £{profit:.2f} | Tier: £{get_stake(profit):.0f}/horse",
+        f"Balance: £{balance:.2f} | {tier_profit_summary(state)}",
         "------------------------------",
     ]
-
-    if redirect:
-        if a_live and a_live < MIN_PICK1_PRICE:
-            lines.append(f"⏭️ Pick 1 odds-on ({a_live}) — £{actual_b:.2f} on Pick 2 only")
-        else:
-            lines.append(f"⏭️ Weak gap + P2 shorter ({a_live} vs {b_live}) — £{actual_b:.2f} on Pick 2 only (gap={gap})")
-    elif stake_b == 0 and stake_a > 0:
+    if stake_b == 0 and stake_a > 0:
         lines.append(f"ℹ️ Pick 2 below min price — backing Pick 1 solo")
-    elif stake_a == 0 and stake_b > 0:
-        lines.append(f"⏭️ Weak gap + P2 shorter — £{actual_b:.2f} on Pick 2 only (gap={gap})")
     elif actual_b < stake_b and not use_bsp_b:
         lines.append(
             f"⚠️ Stake reduced £{stake_b:.0f}→£{actual_b:.0f} "
             f"(P1 liq: £{liq_a:.0f}, P2 liq: £{liq_b:.0f})"
         )
-
     bets_placed    = []
     balance_before = balance
 
@@ -736,8 +721,8 @@ def _live_bet_job(race: dict, state: dict):
       
     # ── Live place bets ───────────────────────────────────────────────────────
     live_place_bets = []
-    # p_stake removed — tier stakes shown via tier_profit_summary
-    cons_places     = _race_cons_places(race)
+    p_stake     = get_place_stake(profit, tier)
+    cons_places = _race_cons_places(race)
   
     try:
         place_mkt, _ = find_place_market(race)
@@ -927,14 +912,11 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     if not place_only and stake_a == 0 and stake_b == 0:
         if not silent:
             if a_live and a_live < MIN_PICK1_PRICE:
-                reason = (
-                    f"Pick 1 {a_name} @ {a_live} odds-on — "
-                    f"no viable redirect (P2 score {p2_sc} or price insufficient)"
-                )
+                reason = f"Pick 1 {a_name} @ {a_live} below min price"
             elif b_live and b_live < MIN_PICK2_PRICE:
                 reason = f"Pick 2 {b_name} @ {b_live} below min {MIN_PICK2_PRICE}"
             else:
-                reason = f"Pick 1 {a_name} @ {a_live} below min {MIN_PICK1_PRICE} — no viable redirect"
+                reason = f"Stakes zero for {a_name} / {b_name}"
             lines.append(f"⏭️ Win bets skipped — {reason}")
         # Don't return — fall through to place bets
 
@@ -973,28 +955,19 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
 
     # ── Build bet notification ────────────────────────────────────────────────
     paper_bets = []
-    tsr_tag    = ""
     p_stake    = get_place_stake(profit, tier)
 
     lines = [
         f"📝 <b>PAPER BET - {race_label}</b>",
         f"{tier_label}",
         f"Balance: £{balance:.2f} | Profit: £{profit:.2f} | "
-        f"Win: £{get_stake(profit):.0f}/horse | Place: £{p_stake:.0f}/horse",
+        f"Win: £{get_stake(profit, tier):.0f}/horse | Place: £{p_stake:.0f}/horse",
         "------------------------------",
     ]
     if not mkt_ok:
         lines.append("⚠️ No Betfair market - using RA odds")
 
-    if redirect:
-        if a_live and a_live < MIN_PICK1_PRICE:
-            lines.append(f"⏭️ Pick 1 odds-on ({a_live}) — £{actual_b:.2f} on Pick 2 only")
-        else:
-            lines.append(f"⏭️ Weak gap + P2 shorter ({a_live} vs {b_live}) — £{actual_b:.2f} on Pick 2 only (gap={gap})")
-    elif stake_a == 0 and stake_b > 0 and not redirect:
-        lines.append(f"⏭️ Weak gap + P2 shorter — £{actual_b:.2f} on Pick 2 only (gap={gap})")
-    elif stake_b == 0 and stake_a > 0:
-        lines.append(f"ℹ️ Pick 2 below min price — backing Pick 1 solo")
+    if stake_b == 0 and stake_a > 0:
     elif actual_b < stake_b and mkt_ok and not use_bsp_b:
         lines.append(
             f"⚠️ Stake reduced £{stake_b:.0f}→£{actual_b:.0f} "
@@ -1070,7 +1043,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                 n_runners = len(race.get("all_runners") or [])
                 # No place bets on <=4 runner races (Betfair only pays winner)
                 if n_runners <= 4:
-                    place_lines.append("📍 ≤4 runners — place bets skipped (win only)")
+                    lines.append("📍 ≤4 runners — place bets skipped (win only)")
                     horses_to_place = []
                 else:
                     horses_to_place = [
@@ -1280,7 +1253,7 @@ def end_of_day_job(state: dict):
 
     lines += [
         "------------------------------",
-        f"Tomorrow's stake: {stake_display(profit)}",
+        tier_profit_summary(state),
         "==============================",
     ]
     send_chunks("\n".join(lines))
@@ -1341,8 +1314,7 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             tier_counts[label] = tier_counts.get(label, 0) + 1
         tier_summary = " | ".join(f"{v}x{k}" for k, v in tier_counts.items())
 
-        profit_sign = "+" if profit >= 0 else ""
-        p_stake     = get_place_stake(profit)
+        profit_sign = "+" if profit >= 0 else ""        
         lines = [
             f"🤖 <b>BETFAIR BOT v3</b> {mode_icon} {mode}",
             "==============================",
@@ -1452,7 +1424,7 @@ def _midday_refresh(scheduler: BackgroundScheduler, state: dict):
     mode = state.get("mode", "paper").upper()
     send(
         f"🔄 <b>Midday refresh</b> - {scheduled} races scheduled\n"
-        f"Mode: {mode} | Balance: £{bal:.2f} | Profit: £{profit:.2f} | {stake_display(profit)}"
+        f"Mode: {mode} | Balance: £{bal:.2f} | Profit: £{profit:.2f}"
     )
 
 
