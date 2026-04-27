@@ -736,7 +736,7 @@ def _live_bet_job(race: dict, state: dict):
       
     # ── Live place bets ───────────────────────────────────────────────────────
     live_place_bets = []
-    p_stake         = get_place_stake(profit, tier)
+    # p_stake removed — tier stakes shown via tier_profit_summary
     cons_places     = _race_cons_places(race)
   
     try:
@@ -1322,9 +1322,7 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             f"Balance:          £{bal:.2f}",
             f"Cumulative P&L:   {profit_sign}£{profit:.2f}  (win + place)",
             f"Banked profit:    £{state.get('banked_profit', 0.0):.2f}",
-            f"Win tier:         £{get_stake(profit):.0f}/horse",
-            f"Place tier:       £{p_stake:.0f}/horse",
-            f"Next tier at:     £{_next_tier_threshold(profit):.0f} profit",
+            tier_profit_summary(state),
             f"Betting:          {'⏸️ PAUSED' if paused else '▶️ ACTIVE'}",
             f"Notifications:    {'🔕 MUTED' if muted else '🔔 ON'}",
             f"Live P&L:         {'+' if live_pnl >= 0 else ''}£{live_pnl:.2f}",
