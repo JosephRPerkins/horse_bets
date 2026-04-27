@@ -1,0 +1,122 @@
+Loaded 17 days of history, 1423 raw races
+
+Running current model...
+Running augmented model...
+
+========================================================================
+  CURRENT MODEL  (647 races)
+========================================================================
+  Tier         N   P1win%   P2win%   P1plc%   P2plc%   P1 P&L   P2 P&L   AvgSP
+  ----------------------------------------------------------------------
+  🔥🔥🔥          4    25.0%     0.0%    50.0%     0.0%    -2.00    -8.00    5.46
+  🔥🔥          30    43.3%    33.3%    83.3%    70.0%   -15.38   +23.08    3.45
+  🔥           74    27.0%    24.3%    58.1%    52.7%    -1.14   +18.18    4.13
+  ·          312    28.8%    20.2%    65.7%    58.0%   -40.68   +35.76    4.51
+  ✗          227    25.1%    15.0%    60.8%    55.1%   +45.22   -70.14    6.98
+  TOTAL      647    28.0%    19.3%    63.8%    56.6%   -13.98    -1.12
+  Winner in top-2: 519/647 (80.2%)
+
+========================================================================
+  AUGMENTED MODEL  (647 races)
+========================================================================
+  Tier         N   P1win%   P2win%   P1plc%   P2plc%   P1 P&L   P2 P&L   AvgSP
+  ----------------------------------------------------------------------
+  🔥🔥🔥          4    25.0%     0.0%    50.0%     0.0%    -2.00    -8.00    4.96
+  🔥🔥         113    29.2%    26.5%    61.1%    60.2%  +169.86  +346.96    7.45
+  🔥           38    31.6%    23.7%    68.4%    50.0%  +311.44   +68.56   11.81
+  ·          297    28.6%    20.5%    67.3%    59.3%  +758.74  +706.44    9.48
+  ✗          195    25.6%    12.8%    59.5%    52.8%   +82.58  -192.86   10.71
+  TOTAL      647    28.0%    19.3%    63.8%    56.6% +1320.62  +921.10
+  Winner in top-2: 464/647 (71.7%)
+
+========================================================================
+  CURRENT MODEL — by score gap
+========================================================================
+  Gap            N   P1win%   P2win%   P1plc%   P2plc%
+  --------------------------------------------------
+  gap 0        201    20.9%    21.9%    60.7%    55.7%
+  gap 1        253    25.7%    19.0%    58.9%    58.1%
+  gap 2        124    29.0%    20.2%    67.7%    54.0%
+  gap 3-4       64    54.7%    10.9%    85.9%    56.2%
+  gap 5+         5    60.0%    20.0%    60.0%    80.0%
+
+========================================================================
+  AUGMENTED MODEL — by score gap
+========================================================================
+  Gap            N   P1win%   P2win%   P1plc%   P2plc%
+  --------------------------------------------------
+  gap 0        140    22.9%    15.7%    59.3%    46.4%
+  gap 1        205    23.4%    20.5%    62.0%    58.0%
+  gap 2        114    32.5%    20.2%    63.2%    56.1%
+  gap 3-4      141    30.5%    20.6%    69.5%    62.4%
+  gap 5+        47    44.7%    19.1%    70.2%    63.8%
+
+========================================================================
+  MODEL DISAGREEMENTS — races where P1 pick differs (263 races)
+========================================================================
+  Total disagreements:     263
+  Augmented right, cur wrong:  67  (25.5%)
+  Current right, aug wrong:    121  (46.0%)
+  Both right:              0  (0.0%)
+  Neither right:           75  (28.5%)
+
+  Cases where augmented model improved (aug right, cur wrong) — top 15:
+  Date         Cur P1                 Aug P1                 Winner                   T_AE   J_AE
+  -----------------------------------------------------------------------------------------------
+  2026-04-09   Got The Booty (FR)     Jumeirah Sands (GB)    Jumeirah Sands (GB)      7.75   0.47
+  2026-04-09   Down To The Kid (IRE   Tilted Kilt (FR)       Tilted Kilt (FR)         0.33   1.30
+  2026-04-09   Gata Ban (IRE)         Boys Of Wexford (GB)   Boys Of Wexford (GB)     3.40   3.10
+  2026-04-09   Naughty Niall (GB)     Port Noir (GB)         Port Noir (GB)           0.80   2.18
+  2026-04-10   Blackwater Lilly (GB   Scots Poet (GB)        Scots Poet (GB)          1.95   1.11
+  2026-04-10   Methgal (IRE)          Royal County Glory (   Royal County Glory (     1.21   0.54
+  2026-04-10   Humble Brag (IRE)      Sean Mc (IRE)          Sean Mc (IRE)            0.76   0.68
+  2026-04-11   Honesty Policy (IRE)   Home By The Lee (IRE   Home By The Lee (IRE     0.54   5.47
+  2026-04-11   Special Rate (IRE)     Parisencore (FR)       Parisencore (FR)         2.04   0.92
+  2026-04-11   Port Station (IRE)     Dunkerque (DEN)        Dunkerque (DEN)          1.95   8.00
+  2026-04-11   Ambishio (IRE)         Proof (GB)             Proof (GB)               1.50   1.24
+  2026-04-11   A Major Payne (GB)     Salamanca City (IRE)   Salamanca City (IRE)     0.53   1.07
+  2026-04-11   Karrygrant (IRE)       New Radical (IRE)      New Radical (IRE)        4.71   1.75
+  2026-04-12   Sea Force (IRE)        Noche Clasica (IRE)    Noche Clasica (IRE)      1.36   1.14
+  2026-04-12   Humble Spark (IRE)     Fast Fred (GB)         Fast Fred (GB)           3.67   1.50
+
+  Cases where current model was better (cur right, aug wrong) — top 15:
+  Date         Cur P1                 Aug P1                 Winner                   T_AE   J_AE
+  -----------------------------------------------------------------------------------------------
+  2026-04-09   Al Sayah (GB)          Just A Rose (FR)       Al Sayah (GB)            1.26   1.50
+  2026-04-09   Gold Star Hero (IRE)   Artagnan (IRE)         Gold Star Hero (IRE)     0.34   0.49
+  2026-04-09   Lunar Tide (GB)        Suir Monad (IRE)       Lunar Tide (GB)          1.53   0.31
+  2026-04-10   Wellington Arch (GB)   Trustintimes (GB)      Wellington Arch (GB)     2.24   1.92
+  2026-04-10   Gold Dancer (FR)       Doyen Quest (IRE)      Gold Dancer (FR)         1.00   1.47
+  2026-04-10   Will The Wise (IRE)    Matata (IRE)           Will The Wise (IRE)      0.60   5.47
+  2026-04-10   Bearish (IRE)          Supreme Lillia (GB)    Bearish (IRE)            3.65   1.56
+  2026-04-10   Myal (GB)              Elarak (GB)            Myal (GB)                1.50   1.24
+  2026-04-10   Juan Les Pins (GB)     Mark's Choice (IRE)    Juan Les Pins (GB)       3.65   6.83
+  2026-04-10   Jered Maddox (GB)      Sovereign Banter (IR   Jered Maddox (GB)        1.53  20.75
+  2026-04-10   Keepsgettingbetter (   Cameclose (IRE)        Keepsgettingbetter (     4.71   1.75
+  2026-04-10   Agameoftwohalves (IR   Jisco Du Brem (FR)     Agameoftwohalves (IR     3.00   0.25
+  2026-04-10   James The Brave (IRE   Tequila Talkin' (IRE   James The Brave (IRE     0.76   4.76
+  2026-04-10   Supreme Jet (IRE)      Fighting Fit (GB)      Supreme Jet (IRE)        1.05   4.76
+  2026-04-11   Bossman Jack (GB)      Montemares (GB)        Bossman Jack (GB)        1.88   1.27
+
+========================================================================
+  A/E THRESHOLD SENSITIVITY — P1 win rate at different AE cutoffs
+  (all history races, filtering to those where aug P1 trainer AE >= threshold)
+========================================================================
+    AE>=  MinRuns   Races   P1win%   P1plc%
+  ------------------------------------------
+     0.0        0     647    28.0%     63.8%
+     1.0        5     362    24.3%     59.1%
+     1.5        5     226    17.7%     56.2%
+     2.0        5     147    17.0%     57.8%
+     2.0       10      89    16.9%     57.3%
+     3.0        5      66    15.2%     48.5%
+
+========================================================================
+  COMBINED FILTER — score gap >= 3 AND trainer AE >= 1.5 (5+ runs)
+  The sweet spot: model confident + trainer in strong form
+========================================================================
+  Races meeting filter: 80
+  P1 win rate:          16/80 = 20.0%
+  P1 place rate:        50/80 = 62.5%
+
+Done.

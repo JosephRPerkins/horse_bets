@@ -1,0 +1,143 @@
+Loaded 18 days | 1423 raw races
+
+Built 647 race records
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║  SECTION 1: PICK AGREEMENT — current vs mw=0.6 by System C tier       ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+  Tier           N   Agree   AgreeW%   AgreeP%   Dis    CurW%     MSW%    CurP%     MSP%
+  ----------------------------------------------------------------------------------
+  ELITE         68      61     45.9%      72.1%      7    28.6%     28.6%     85.7%     57.1%
+  STRONG       151     109     40.4%      71.6%     42    19.0%     16.7%     66.7%     64.3%
+  GOOD         156      60     23.3%      66.7%     96    21.9%     19.8%     65.6%     54.2%
+  STANDARD      73      30     33.3%      66.7%     43    23.3%     16.3%     53.5%     44.2%
+  WEAK           1       0      0.0%       0.0%      1     0.0%    100.0%      0.0%    100.0%
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║  SECTION 2: CURRENT BETTING LOGIC BY SYSTEM C TIER                     ║
+║  What does the bot actually do in each System C tier?                  ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+  System C ELITE (68 races):
+  Decision             N     %   P1win%   P1plc%    WinP&L    PlcP&L   Combined
+  --------------------------------------------------------------------------
+  P1+P2               46   68%     32.6%     65.2%     +52.24    -44.75      +7.49
+  P1 solo              1    1%      0.0%    100.0%      -2.00     +2.00      +0.00
+  P2 redirect          5    7%     60.0%    100.0%      -9.00    -10.60     -19.60
+  SKIP (stakes)       16   24%     75.0%     87.5%      +0.00     +0.00      +0.00
+
+  System C STRONG (151 races):
+  Decision             N     %   P1win%   P1plc%    WinP&L    PlcP&L   Combined
+  --------------------------------------------------------------------------
+  P1+P2               82   54%     28.0%     59.8%     -43.94   -125.91    -169.85
+  P1 solo              2    1%      0.0%    100.0%      -4.00     +2.80      -1.20
+  P2 redirect         36   24%     30.6%     75.0%     -52.96    -92.19    -145.15
+  SKIP (stakes)       28   19%     60.7%     89.3%      +0.00     +0.00      +0.00
+  SKIP (qual)          3    2%     33.3%    100.0%      +0.00     +0.00      +0.00
+
+  System C GOOD (156 races):
+  Decision             N     %   P1win%   P1plc%    WinP&L    PlcP&L   Combined
+  --------------------------------------------------------------------------
+  P1+P2               70   45%     21.4%     57.1%     -89.02   -118.99    -208.01
+  P1 solo              2    1%      0.0%     50.0%      -4.00     +0.25      -3.75
+  P2 redirect         59   38%     16.9%     69.5%     +21.68   -104.04     -82.36
+  SKIP (stakes)       25   16%     40.0%     84.0%      +0.00     +0.00      +0.00
+
+  System C STANDARD (73 races):
+  Decision             N     %   P1win%   P1plc%    WinP&L    PlcP&L   Combined
+  --------------------------------------------------------------------------
+  P1+P2               42   58%     21.4%     54.8%     -89.90    -85.74    -175.64
+  P1 solo              1    1%      0.0%    100.0%      -2.00     +2.67      +0.67
+  P2 redirect         21   29%     23.8%     57.1%     -54.48    -71.95    -126.43
+  SKIP (stakes)        9   12%     66.7%     77.8%      +0.00     +0.00      +0.00
+
+  System C WEAK (1 races):
+  Decision             N     %   P1win%   P1plc%    WinP&L    PlcP&L   Combined
+  --------------------------------------------------------------------------
+  P2 redirect          1  100%      0.0%      0.0%      -4.00     -4.00      -8.00
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║  SECTION 3: EXPENSIVE LOGIC DECISIONS — ranked by P&L cost             ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+  Decision type                                     N   Total cost
+  -----------------------------------------------------------------
+  P2 redirect but P1 WON (·     STANDARD)          16      -187.24
+    → 2026-04-11 Yarmouth 4:25 P1=Generic (IRE) SP=3.2 tier_c=STANDARD
+    → 2026-04-12 Down Royal (IRE) 5:07 P1=Mastermind (IRE) SP=29.0 tier_c=HARD_SKIP
+    → 2026-04-14 Market Rasen 3:20 P1=Hans Lippershey  SP=11.0 tier_c=GOOD
+  SysC STRONG: P1 skipped/redirected but P1 WON    29       -77.60
+    → 2026-04-09 Southwell (AW) 3:17 P1=Master Of My Fat SP=5.5 tier_c=STRONG
+    → 2026-04-10 Wolverhampton (AW) 5:23 P1=Step To Glory (I SP=3.8 tier_c=STRONG
+    → 2026-04-10 Dundalk (AW) (IRE) 5:07 P1=New Yorker (USA) SP=1.6 tier_c=STRONG
+  GOOD tier cap missed big winner                   6       -67.66
+    → 2026-04-10 Wolverhampton (AW) 6:30 P1=Hunky Dory (GB) SP=5.0 tier_c=GOOD
+    → 2026-04-13 Hexham 3:00 P1=Snapaudaciaheros SP=7.0 tier_c=GOOD
+    → 2026-04-14 Market Rasen 3:20 P1=Hans Lippershey  SP=11.0 tier_c=GOOD
+  P2 redirect but P1 WON (✗     SKIP)              11       -61.06
+    → 2026-04-10 Wolverhampton (AW) 5:23 P1=Step To Glory (I SP=3.8 tier_c=STRONG
+    → 2026-04-13 Newcastle (AW) 7:30 P1=Far Far Out (IRE SP=2.6 tier_c=STRONG
+    → 2026-04-15 Southwell (AW) 7:00 P1=Goldinthesea (IR SP=3.5 tier_c=GOOD
+  P2 redirect but P1 WON (🔥    GOOD)                5       -52.82
+    → 2026-04-09 Southwell (AW) 3:17 P1=Master Of My Fat SP=5.5 tier_c=STRONG
+    → 2026-04-10 Wolverhampton (AW) 6:30 P1=Hunky Dory (GB) SP=5.0 tier_c=GOOD
+    → 2026-04-11 Southwell (AW) 4:45 P1=Galilean Quality SP=1.9 tier_c=STRONG
+  SysC ELITE: P1 skipped/redirected but P1 WON     15       -38.74
+    → 2026-04-09 Taunton 2:32 P1=Minella Yoga (IR SP=1.3 tier_c=ELITE
+    → 2026-04-09 Wolverhampton (AW) 8:00 P1=On The Inlet (IR SP=1.2 tier_c=ELITE
+    → 2026-04-10 Sedgefield 2:32 P1=Dartmouth Castle SP=1.5 tier_c=ELITE
+  SUPREME elevated stake LOSS                       3       -12.00
+    → 2026-04-09 Taunton 4:50 P1=Al Sayah (GB) SP=5.5 tier_c=STRONG
+    → 2026-04-11 Yarmouth 5:40 P1=Almaty Star (IRE SP=9.0 tier_c=STRONG
+    → 2026-04-12 Musselburgh 4:15 P1=Suddenly I See ( SP=4.3 tier_c=STRONG
+  P2 redirect but P1 WON (🔥🔥  STRONG)               1        -5.50
+    → 2026-04-12 Wincanton 4:30 P1=Obsessedwithyou  SP=3.8 tier_c=ELITE
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║  SECTION 4: ODDS-ON P1 ANALYSIS BY SYSTEM C TIER                      ║
+║  Current: SUPREME backs, STRONG skips, GOOD redirects if P2 strong    ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+  Tier                Sub     N   P1win%   P1plc%    P1 P&L   P2win%   P2plc%        Verdict
+  ----------------------------------------------------------------------------------
+  ELITE        Odds-on P1    17    76.5%     88.2%      +3.24    11.8%     70.6%          BACK ✓
+  ELITE       Not odds-on    51    33.3%     68.6%     +11.34     0.0%      0.0%                
+  STRONG       Odds-on P1    29    62.1%     89.7%      -0.04    13.8%     69.0%  BACK (neg ROI)
+  STRONG      Not odds-on   122    27.9%     65.6%     -38.42     0.0%      0.0%                
+  GOOD         Odds-on P1    25    40.0%     84.0%     -19.02    36.0%     92.0%        MARGINAL
+  GOOD        Not odds-on   131    19.1%     62.6%     -78.98     0.0%      0.0%                
+  STANDARD     Odds-on P1     9    66.7%     77.8%      +2.52    11.1%     66.7%          BACK ✓
+  STANDARD    Not odds-on    64    21.9%     56.2%     -43.40     0.0%      0.0%                
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║  SECTION 5: SCORE GAP + MARKET REDIRECT — is the rule working?         ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+  Tier       Type             N   P1win%   P2win%   P2(redirect)P&L   P1(counterfact)P&L   Better?
+  --------------------------------------------------------------------------------------
+  ELITE      redirect         5    40.0%     40.0%              -0.30               +21.50      P1 ✓
+  ELITE      normal          63    44.4%     25.4%             +39.66                -6.92      P2 ✓
+  STRONG     redirect        42    26.2%     23.8%             -31.98                -7.54      P1 ✓
+  STRONG     normal         109    37.6%     18.3%             -24.38               -30.92      P2 ✓
+  GOOD       redirect        61    16.4%     36.1%              +6.84               -15.10      P2 ✓
+  GOOD       normal          95    26.3%     23.2%             +11.52               -82.90      P2 ✓
+  STANDARD   redirect        22    22.7%      9.1%             -29.24               -10.00      P1 ✓
+  STANDARD   normal          51    29.4%      7.8%             -65.50               -30.88      P1 ✓
+  WEAK       redirect         1     0.0%      0.0%              -2.00                -2.00      P1 ✓
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║  SECTION 6: REVISED BETTING LOGIC PROPOSAL                             ║
+║  What the data suggests the logic should look like                     ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+  Revised logic: mw=0.6 picks, flat £2 each, place bets ELITE+STRONG only
+  Tier           N   P1win%   P2win%   EitherW%   NeitherP%    WinP&L    PlcP&L   Combined
+  ----------------------------------------------------------------------------------------
+  ELITE         68    66.2%     13.2%       79.4%         8.8%     +22.54    +32.40     +54.94
+  STRONG       151    48.3%     23.2%       71.5%         7.9%    +101.82    +40.08    +141.90
+  GOOD         156    35.9%     30.1%       66.0%        11.5%    +172.66     +0.00    +172.66
+  STANDARD      73    30.1%     17.8%       47.9%        20.5%     -12.70     +0.00     -12.70
+  TOTAL        448    43.8%                 67.0%        11.4%    +284.32    +72.48    +356.80
+
+Done.
