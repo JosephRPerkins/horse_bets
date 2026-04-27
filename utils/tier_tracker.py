@@ -1,15 +1,15 @@
 """
 utils/tier_tracker.py
 
-Live validation logger for confidence tier performance.
+Live validation logger for confidence tier performance — System C.
 
 Records every qualifying race result against its tier so you can track
-actual live hit rates vs the backtest claims:
+actual live hit rates vs the validated backtest claims:
 
-  SUPREME  — claimed 93% win rate
-  STRONG   — claimed 65%
-  GOOD     — claimed 56%
-  STANDARD — claimed 43%
+  ELITE    — validated ~67% P1 win rate
+  STRONG   — validated ~49% P1 win rate
+  GOOD     — validated ~36% P1 win rate
+  STANDARD — info only (~30%)
 
 Usage:
     from utils.tier_tracker import log_result, print_report
@@ -17,12 +17,12 @@ Usage:
     # Log a result after a race settles:
     log_result(
         race_id  = "abc123",
-        tier     = 3,           # TIER_SUPREME = 3
+        tier     = 4,           # TIER_ELITE = 4
         course   = "Newmarket",
         off      = "14:30",
         pick1    = "Horse Name",
         pick2    = "Other Horse",
-        win1     = True,        # did pick1 finish in the required places?
+        win1     = True,
         win2     = False,
     )
 
@@ -44,20 +44,22 @@ TRACK_PATH = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "data", "logs", "tier_performance.json"
 )
 
-# Expected win rates from backtest — used to flag when live rate diverges
+# Validated win rates from 17-day history (System C)
 BACKTEST_WIN_RATES = {
-    3:  0.93,   # TIER_SUPREME
-    2:  0.65,   # TIER_STRONG
-    1:  0.56,   # TIER_GOOD
-    0:  0.43,   # TIER_STANDARD
-    -1: 0.35,   # TIER_SKIP
+    4:  0.67,   # TIER_ELITE
+    3:  0.49,   # TIER_STRONG
+    2:  0.36,   # TIER_GOOD
+    1:  0.30,   # TIER_STANDARD
+    0:  0.00,   # TIER_WEAK
+    -1: 0.00,   # TIER_SKIP
 }
 
 TIER_NAMES = {
-    3:  "🔥🔥🔥 SUPREME",
-    2:  "🔥🔥 STRONG",
-    1:  "🔥 GOOD",
-    0:  "· STANDARD",
+    4:  "💎 ELITE",
+    3:  "🔥 STRONG",
+    2:  "✓ GOOD",
+    1:  "· STANDARD",
+    0:  "~ WEAK",
     -1: "✗ SKIP",
 }
 
@@ -101,40 +103,34 @@ def log_result(
     pick2:    str,
     win1:     bool,
     win2:     bool,
-    places:   int = None,
-    tsr_solo: bool = False,
+    places:   int  = None,
+    tsr_solo: bool = False,   # kept for API compatibility, no longer used
 ) -> None:
     """
     Record the outcome of one race.
-
     win1 / win2: True if the pick finished within the required place terms.
-    tsr_solo: True if the SUPREME tier was triggered by a TSR solo signal —
-              tracked separately so we can validate the 93% claim specifically
-              for TSR solo vs other SUPREME triggers.
     """
     data = _load()
 
-    # Avoid duplicate entries for the same race
     existing_ids = {r.get("race_id") for r in data}
     if race_id in existing_ids:
         logger.debug(f"tier_tracker: {race_id} already logged, skipping")
         return
 
     entry = {
-        "date":     date.today().isoformat(),
-        "time":     datetime.now().strftime("%H:%M"),
-        "race_id":  race_id,
-        "tier":     tier,
-        "course":   course,
-        "off":      off,
-        "pick1":    pick1,
-        "pick2":    pick2,
-        "win1":     win1,
-        "win2":     win2,
-        "either":   win1 or win2,
-        "both":     win1 and win2,
-        "places":   places,
-        "tsr_solo": tsr_solo,
+        "date":    date.today().isoformat(),
+        "time":    datetime.now().strftime("%H:%M"),
+        "race_id": race_id,
+        "tier":    tier,
+        "course":  course,
+        "off":     off,
+        "pick1":   pick1,
+        "pick2":   pick2,
+        "win1":    win1,
+        "win2":    win2,
+        "either":  win1 or win2,
+        "both":    win1 and win2,
+        "places":  places,
     }
 
     data.append(entry)
@@ -154,15 +150,11 @@ def _tier_stats(data: list, tier: int) -> dict:
     if not races:
         return {"n": 0}
 
-    n       = len(races)
-    win1    = sum(1 for r in races if r.get("win1"))
-    win2    = sum(1 for r in races if r.get("win2"))
-    either  = sum(1 for r in races if r.get("either"))
-    both    = sum(1 for r in races if r.get("both"))
-
-    # TSR solo subset (SUPREME only)
-    tsr_races = [r for r in races if r.get("tsr_solo")]
-    tsr_wins  = sum(1 for r in tsr_races if r.get("win1"))
+    n      = len(races)
+    win1   = sum(1 for r in races if r.get("win1"))
+    win2   = sum(1 for r in races if r.get("win2"))
+    either = sum(1 for r in races if r.get("either"))
+    both   = sum(1 for r in races if r.get("both"))
 
     return {
         "n":          n,
@@ -171,18 +163,16 @@ def _tier_stats(data: list, tier: int) -> dict:
         "either":     either,
         "both":       both,
         "win1_pct":   win1 / n,
+        "win2_pct":   win2 / n,
         "either_pct": either / n,
         "both_pct":   both / n,
-        "tsr_n":      len(tsr_races),
-        "tsr_wins":   tsr_wins,
-        "tsr_pct":    tsr_wins / len(tsr_races) if tsr_races else None,
     }
 
 
-def _divergence_alerts(stats_by_tier: dict) -> list[str]:
+def _divergence_alerts(stats_by_tier: dict) -> list:
     """
-    Return a list of warning strings where live rate diverges significantly
-    from the backtest claim. Only fires when sample >= MIN_SAMPLE_FOR_ALERT.
+    Return warning strings where live rate diverges from validated rate.
+    Only fires when sample >= MIN_SAMPLE_FOR_ALERT.
     """
     alerts = []
     for tier, stats in stats_by_tier.items():
@@ -190,7 +180,7 @@ def _divergence_alerts(stats_by_tier: dict) -> list[str]:
         if n < MIN_SAMPLE_FOR_ALERT:
             continue
         expected = BACKTEST_WIN_RATES.get(tier)
-        if expected is None:
+        if not expected:
             continue
         actual = stats.get("win1_pct", 0)
         diff   = actual - expected
@@ -198,13 +188,13 @@ def _divergence_alerts(stats_by_tier: dict) -> list[str]:
 
         if diff <= -0.15:
             alerts.append(
-                f"⚠️ {name}: live win rate {actual:.0%} vs backtest {expected:.0%} "
-                f"(−{abs(diff):.0%} over {n} races) — model may be overfitted"
+                f"⚠️ {name}: live {actual:.0%} vs validated {expected:.0%} "
+                f"(−{abs(diff):.0%} over {n} races)"
             )
         elif diff >= 0.10:
             alerts.append(
-                f"✅ {name}: live win rate {actual:.0%} vs backtest {expected:.0%} "
-                f"(+{diff:.0%} over {n} races) — outperforming"
+                f"✅ {name}: live {actual:.0%} vs validated {expected:.0%} "
+                f"(+{diff:.0%} over {n} races)"
             )
     return alerts
 
@@ -212,11 +202,7 @@ def _divergence_alerts(stats_by_tier: dict) -> list[str]:
 # ── Reports ───────────────────────────────────────────────────────────────────
 
 def print_report(last_n_days: int = None) -> None:
-    """
-    Print a full tier performance report to the terminal.
-
-    last_n_days: if set, only include races from the last N days.
-    """
+    """Print a full tier performance report to the terminal."""
     data = _load()
 
     if last_n_days:
@@ -233,43 +219,38 @@ def print_report(last_n_days: int = None) -> None:
 
     print()
     print("=" * 60)
-    print(f"  TIER PERFORMANCE REPORT")
+    print(f"  TIER PERFORMANCE REPORT — System C")
     print(f"  {total_races} races  |  {date_range}")
     if last_n_days:
         print(f"  (last {last_n_days} days)")
     print("=" * 60)
 
     stats_by_tier = {}
-    for tier in (3, 2, 1, 0, -1):
+    for tier in (4, 3, 2, 1, 0, -1):
         stats = _tier_stats(data, tier)
         stats_by_tier[tier] = stats
         if stats["n"] == 0:
             continue
 
-        n         = stats["n"]
-        w1        = stats["win1"]
-        w1p       = stats["win1_pct"]
-        ei        = stats["either"]
-        eip       = stats["either_pct"]
-        bt        = BACKTEST_WIN_RATES.get(tier, 0)
-        diff      = w1p - bt
-        diff_s    = f"+{diff:.0%}" if diff >= 0 else f"{diff:.0%}"
-        name      = TIER_NAMES.get(tier, str(tier))
-        sample_s  = "" if n >= MIN_SAMPLE_FOR_ALERT else f"  ⚠ small sample (need {MIN_SAMPLE_FOR_ALERT})"
+        n        = stats["n"]
+        w1       = stats["win1"]
+        w1p      = stats["win1_pct"]
+        w2       = stats["win2"]
+        w2p      = stats["win2_pct"]
+        ei       = stats["either"]
+        eip      = stats["either_pct"]
+        bt       = BACKTEST_WIN_RATES.get(tier, 0)
+        diff     = w1p - bt
+        diff_s   = f"+{diff:.0%}" if diff >= 0 else f"{diff:.0%}"
+        name     = TIER_NAMES.get(tier, str(tier))
+        sample_s = "" if n >= MIN_SAMPLE_FOR_ALERT else f"  ⚠ small sample (need {MIN_SAMPLE_FOR_ALERT})"
 
         print(f"\n  {name}")
         print(f"    Races  : {n}{sample_s}")
-        print(f"    Pick 1 : {w1}/{n}  ({w1p:.0%})  vs backtest {bt:.0%}  [{diff_s}]")
+        print(f"    Pick 1 : {w1}/{n}  ({w1p:.0%})  vs validated {bt:.0%}  [{diff_s}]")
+        print(f"    Pick 2 : {w2}/{n}  ({w2p:.0%})")
         print(f"    Either : {ei}/{n}  ({eip:.0%})")
 
-        # TSR solo breakdown (SUPREME only)
-        if tier == 3 and stats["tsr_n"] > 0:
-            tp  = stats["tsr_pct"]
-            tn  = stats["tsr_n"]
-            tw  = stats["tsr_wins"]
-            print(f"    TSR solo subset: {tw}/{tn}  ({tp:.0%})  [claimed 93%]")
-
-    # Divergence alerts
     alerts = _divergence_alerts(stats_by_tier)
     if alerts:
         print()
@@ -277,27 +258,23 @@ def print_report(last_n_days: int = None) -> None:
         for a in alerts:
             print(f"  {a}")
 
-    # Recent form — last 10 races regardless of tier
     print()
     print("  ── Last 10 races ──────────────────────────────────────")
     for r in data[-10:]:
-        w1 = "✅" if r.get("win1") else "❌"
-        w2 = "✅" if r.get("win2") else "❌"
+        w1   = "✅" if r.get("win1") else "❌"
+        w2   = "✅" if r.get("win2") else "❌"
         name = TIER_NAMES.get(r.get("tier"), "?")
         print(
             f"  {r.get('date')}  {r.get('off','?'):5}  {r.get('course','?'):20}"
-            f"  {name:18}  P1:{w1}  P2:{w2}"
+            f"  {name:12}  P1:{w1}  P2:{w2}"
         )
     print()
 
 
 def get_eod_summary() -> str:
-    """
-    Short summary string for the end-of-day Telegram message.
-    Shows today's tier breakdown and any divergence alerts.
-    """
-    data  = _load()
-    today = date.today().isoformat()
+    """Short summary for end-of-day Telegram message."""
+    data       = _load()
+    today      = date.today().isoformat()
     today_data = [r for r in data if r.get("date") == today]
 
     if not today_data:
@@ -305,45 +282,31 @@ def get_eod_summary() -> str:
 
     lines = ["📊 <b>Tier tracker — today</b>"]
 
-    for tier in (3, 2, 1, 0):
+    for tier in (4, 3, 2, 1):
         races = [r for r in today_data if r.get("tier") == tier]
         if not races:
             continue
         n    = len(races)
         wins = sum(1 for r in races if r.get("win1"))
         name = TIER_NAMES.get(tier, str(tier))
-        lines.append(f"  {name}: {wins}/{n}")
+        lines.append(f"  {name}: {wins}/{n} P1 wins")
 
-    # All-time divergence alerts (if sample large enough)
-    stats_by_tier = {t: _tier_stats(data, t) for t in (3, 2, 1, 0, -1)}
-    alerts = _divergence_alerts(stats_by_tier)
-    for a in alerts:
+    # All-time divergence alerts
+    stats_by_tier = {t: _tier_stats(data, t) for t in (4, 3, 2, 1, 0, -1)}
+    for a in _divergence_alerts(stats_by_tier):
         lines.append(a)
 
     return "\n".join(lines)
 
 
-def supreme_hit_rate() -> str:
-    """
-    Quick one-liner for the SUPREME tier hit rate.
-    Useful for a quick sanity check from the terminal.
-
-    Usage:
-        python -c "from utils.tier_tracker import supreme_hit_rate; print(supreme_hit_rate())"
-    """
-    data   = _load()
-    stats  = _tier_stats(data, 3)
-    n      = stats.get("n", 0)
+def elite_hit_rate() -> str:
+    """Quick one-liner for the ELITE tier hit rate."""
+    data  = _load()
+    stats = _tier_stats(data, 4)
+    n     = stats.get("n", 0)
     if n == 0:
-        return "SUPREME: no races logged yet"
-    w      = stats["win1"]
-    pct    = stats["win1_pct"]
-    tsr_n  = stats["tsr_n"]
-    tsr_w  = stats["tsr_wins"]
-    tsr_p  = stats["tsr_pct"]
-    note   = "" if n >= MIN_SAMPLE_FOR_ALERT else f" (⚠ small sample — need {MIN_SAMPLE_FOR_ALERT})"
-
-    lines = [f"SUPREME: {w}/{n} ({pct:.0%}){note}  [backtest: 93%]"]
-    if tsr_n:
-        lines.append(f"  TSR solo: {tsr_w}/{tsr_n} ({tsr_p:.0%})")
-    return "\n".join(lines)
+        return "ELITE: no races logged yet"
+    w   = stats["win1"]
+    pct = stats["win1_pct"]
+    note = "" if n >= MIN_SAMPLE_FOR_ALERT else f" (⚠ small sample — need {MIN_SAMPLE_FOR_ALERT})"
+    return f"💎 ELITE: {w}/{n} ({pct:.0%}){note}  [validated: 67%]"
