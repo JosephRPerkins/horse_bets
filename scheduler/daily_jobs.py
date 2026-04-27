@@ -391,7 +391,7 @@ def _analyse_race(race: dict) -> dict:
     except (ValueError, TypeError):
         field_size = len(runners)
 
-    # ── Score runners (predict.py) ────────────────────────────────────────────
+    # ── Score runners (predict.py) — kept for signals/flags display ──────────
     scored = []
     for r in runners:
         sc, signals = score_runner(r)
@@ -405,27 +405,27 @@ def _analyse_race(race: dict) -> dict:
     scored.sort(key=lambda r: (-r.get("score", 0),
                                r.get("sp_dec") or 999))
 
-    top1 = scored[0] if len(scored) >= 1 else None
-    top2 = scored[1] if len(scored) >= 2 else None
-
-    win_score = top1.get("score", 0) if top1 else 0
+    win_score = scored[0].get("score", 0) if scored else 0
 
     # ── Place terms ───────────────────────────────────────────────────────────
     std_places  = place_terms(field_size)
     cons_places = conservative_place_terms(field_size)
 
-    # ── Confidence tier ───────────────────────────────────────────────────────
-    race_for_tier = {
-        "type":    race.get("type", "Unknown"),
+    # ── System C tier + blended picks ────────────────────────────────────────
+    # P1 mw=0.60 (market-heavy for confidence)
+    # P2 mw=0.40 (stats-heavy for value)
+    # Tier by stats/market rank agreement + SP-free score
+    from predict_v2 import get_blended_picks, TIER_LABELS, rpr_coverage
+    raw_race_meta = {
+        "class":   race.get("race_class") or race.get("class", ""),
         "surface": surface,
-        "class":   race.get("race_class") or race.get("class", "Unknown"),
-        "runners": runners,          # raw runners — has tsr/or fields
-        "dist_f":  dist,             # string e.g. "2m4f" for dist_furlongs()
+        "type":    race.get("type", "Unknown"),
     }
-    tier, reasons = race_confidence(race_for_tier, win_score)
-
-    from predict_v2 import TIER_LABELS
-    tier_label = TIER_LABELS.get(tier, "· STANDARD")
+    tier, top1, top2, reasons = get_blended_picks(
+        runners, mw_p1=0.60, mw_p2=0.40, raw_race=raw_race_meta
+    )
+    tier_label = TIER_LABELS.get(tier, "·   STANDARD")
+    rpr_cov    = rpr_coverage(runners)
 
     return {
         "race_id":      race.get("race_id", ""),
@@ -452,6 +452,7 @@ def _analyse_race(race: dict) -> dict:
         "top1":         top1,
         "top2":         top2,
         "all_runners":  scored,
+        "rpr_cov":      rpr_cov,
     }
 
 
