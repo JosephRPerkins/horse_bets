@@ -61,13 +61,16 @@ from betfair.api         import (
     get_bsp_matched_price, _to_utc, _to_local_naive, COMMISSION,
 )
 from betfair.strategy    import (
-    qualifies, is_tsr_trigger, get_stake, get_place_stake, pick_stakes,
-    apply_liquidity, check_topup_alerts, stake_display, MIN_BACK_PRICE,
-    MIN_LIQUIDITY, MIN_PICK1_PRICE, MIN_PICK2_PRICE, should_back_pick1,
-    should_back_pick2, STAKE_TIERS, min_liquidity_for_price,
+    qualifies, get_stake, get_place_stake, pick_stakes,
+    MIN_BACK_PRICE, MIN_LIQUIDITY, MIN_PICK1_PRICE, MIN_PICK2_PRICE,
+    should_back_pick1, should_back_pick2, min_liquidity_for_price,
+    next_tier_threshold, BET_TIERS,
 )
-from predict_v2 import TIER_SUPREME
-from betfair.state       import load, save, reset_daily, update_cumulative_profit
+from predict_v2 import TIER_ELITE, TIER_STRONG, TIER_GOOD, TIER_STD, TIER_SKIP, TIER_LABELS
+from betfair.state       import (
+    load, save, reset_daily, update_cumulative_profit,
+    get_tier_profit, tier_profit_summary,
+)
 from betfair.balance_log import log_bet_placed, start_balance_logger
 from betfair.settlement  import settle_race
 from betfair.notify      import send, send_chunks, set_muted
@@ -130,18 +133,7 @@ def _race_cons_places(race: dict) -> int:
     n = len(race.get("runners", [])) or race.get("field_size", 0) or 1
     return min(_race_places(race) + 1, max(n - 1, 1))
 
-
-def _pick2_score(race: dict) -> int:
-    top2 = race.get("top2") or {}
-    return int(top2.get("score", 0) or 0)
-
-
-def _score_gap(race: dict) -> int:
-    """P1 score minus P2 score. Used for market-disagreement redirect logic."""
-    top1 = race.get("top1") or {}
-    top2 = race.get("top2") or {}
-    return int((top1.get("score") or 0) - (top2.get("score") or 0))
-
+# _pick2_score and _score_gap removed — System C no longer uses score gap redirects
 
 def _find_fallback_pick(race: dict, exclude_names: list, odds: dict, bf_runners: list):
     """
@@ -527,48 +519,14 @@ def _live_bet_job(race: dict, state: dict):
     race_label = f"{off_str} {course}"
     tier_label = race.get("tier_label", "")
     tier       = race.get("tier", 0)
-    tsr        = is_tsr_trigger(race)
     balance    = get_balance()
-    profit     = state.get("cumulative_profit", 0.0)
-    p2_sc      = _pick2_score(race)
-    gap        = _score_gap(race)
+    profit     = get_tier_profit(state, tier)
+    lines      = []
 
-    # ── Re-verify SUPREME gate at bet time ────────────────────────────────────
-    # Tier is pre-baked into the card at build time. Re-check at bet time
-    # using all_runners so AW/large-field SUPREME races are correctly downgraded.
-    if tier == TIER_SUPREME:
-        from predict_v2 import race_confidence
-        from predict import score_runner as _score_runner
-        _runners = race.get("all_runners") or []
-        if _runners:
-            _scored = sorted([{**r, "score": _score_runner(r)[0]} for r in _runners],
-                             key=lambda x: -x["score"])
-            _raw2 = {**race, "runners": _scored}
-            _tier, _ = race_confidence(_raw2, _scored[0]["score"] if _scored else 0)
-            if _tier != TIER_SUPREME:
-                tier = _tier
-                logger.info(f"{race_label}: SUPREME downgraded to tier {tier} at bet time")
-    tsr = is_tsr_trigger(race) and tier == TIER_SUPREME
-    lines = []
-  
     top1   = race.get("top1") or {}
     top2   = race.get("top2") or {}
     a_name = top1.get("horse", "?")
     b_name = top2.get("horse", "?")
-
-    all_runners = race.get("all_runners", [])
-    pick3_price = None
-    for r in all_runners:
-        name = r.get("horse", "")
-        from betfair.api import _norm_horse
-        if _norm_horse(name) not in [_norm_horse(a_name), _norm_horse(b_name)]:
-            pick3_price = r.get("sp_dec")
-            break
-
-    prev_stake = state.get("_prev_tier_stake")
-    for alert in check_topup_alerts(balance, profit, prev_stake):
-        send(alert)
-    state["_prev_tier_stake"] = get_stake(profit)
 
     mkt, odds, bf_runners = _get_market(race)
     if mkt is None:
@@ -606,17 +564,11 @@ def _live_bet_job(race: dict, state: dict):
     lay_liq_a  = a_info.get("lay_size", 0.0)
     lay_liq_b  = b_info.get("lay_size", 0.0)
 
-    stake_a, stake_b = pick_stakes(
-        profit, tsr, a_live, b_live, tier=tier,
-        pick2_score=p2_sc, pick3_price=pick3_price, score_gap=gap
-    )
-    # In <=4 runner races, back clear favourite solo (win only, no P2)
     n_runners_live = len(race.get("all_runners") or [])
-    if n_runners_live <= 4 and a_live and b_live and a_live < 2.0 and b_live > a_live * 4.0:
-        stake_b = 0.0
-        lines.append(f"ℹ️ ≤4 runners, clear favourite — backing P1 only")
-    place_only = (stake_a == -1.0 and stake_b == -1.0)
-    place_only = (stake_a == -1.0 and stake_b == -1.0)
+    stake_a, stake_b, stake_place = pick_stakes(
+        profit, tier, a_live, b_live, n_runners=n_runners_live
+    )
+    place_only = False
     if place_only:
         send(f"🐴 💰 {race_label} — two-horse race, place market only (paper tracking)")
         return
@@ -911,46 +863,17 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     race_label = f"{off_str} {course}"
     tier_label = race.get("tier_label", "")
     tier       = race.get("tier", 0)
-    tsr        = is_tsr_trigger(race)
     balance    = get_balance()
-    profit     = state.get("cumulative_profit", 0.0)
-    p2_sc      = _pick2_score(race)
-    gap        = _score_gap(race)
+    profit     = get_tier_profit(state, tier)
+    lines      = []
 
-    # ── Re-verify SUPREME gate at bet time ────────────────────────────────────
-    # Tier is pre-baked into the card at build time. Re-check at bet time
-    # using all_runners so AW/large-field SUPREME races are correctly downgraded.
-    if tier == TIER_SUPREME:
-        from predict_v2 import race_confidence
-        from predict import score_runner as _score_runner
-        _runners = race.get("all_runners") or []
-        if _runners:
-            _scored = sorted([{**r, "score": _score_runner(r)[0]} for r in _runners],
-                             key=lambda x: -x["score"])
-            _raw2 = {**race, "runners": _scored}
-            _tier, _ = race_confidence(_raw2, _scored[0]["score"] if _scored else 0)
-            if _tier != TIER_SUPREME:
-                tier = _tier
-                logger.info(f"{race_label}: SUPREME downgraded to tier {tier} at bet time")
-    tsr = is_tsr_trigger(race) and tier == TIER_SUPREME
-    lines = []
-  
     top1   = race.get("top1") or {}
     top2   = race.get("top2") or {}
     a_name = top1.get("horse", "?")
     b_name = top2.get("horse", "?")
 
-    all_runners = race.get("all_runners", [])
-    pick3_price = None
-    for r in all_runners:
-        name = r.get("horse", "")
-        from betfair.api import _norm_horse
-        if _norm_horse(name) not in [_norm_horse(a_name), _norm_horse(b_name)]:
-            pick3_price = r.get("sp_dec")
-            break
-
     mkt, odds, bf_runners = _get_market(race)
-    mkt_ok = mkt is not None
+    mkt_ok   = mkt is not None
     a_sel_id = find_selection_id(a_name, bf_runners) if mkt_ok else None
     b_sel_id = find_selection_id(b_name, bf_runners) if mkt_ok else None
 
@@ -996,17 +919,11 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
             return
 
     # ── Stake calculation ─────────────────────────────────────────────────────
-    stake_a, stake_b = pick_stakes(
-        profit, tsr, a_live, b_live, tier=tier,
-        pick2_score=p2_sc, pick3_price=pick3_price, score_gap=gap
-    )
-    # In <=4 runner races, back clear favourite solo (win only, no P2)
     n_runners_live = len(race.get("all_runners") or [])
-    if n_runners_live <= 4 and a_live and b_live and a_live < 2.0 and b_live > a_live * 4.0:
-        stake_b = 0.0
-        lines.append(f"ℹ️ ≤4 runners, clear favourite — backing P1 only")
-    place_only = (stake_a == -1.0 and stake_b == -1.0)
-    place_only = (stake_a == -1.0 and stake_b == -1.0)
+    stake_a, stake_b, stake_place = pick_stakes(
+        profit, tier, a_live, b_live, n_runners=n_runners_live
+    )
+    place_only = False
     if not place_only and stake_a == 0 and stake_b == 0:
         if not silent:
             if a_live and a_live < MIN_PICK1_PRICE:
@@ -1285,8 +1202,7 @@ def end_of_day_job(state: dict):
         f"Balance:          £{bal:.2f}",
         f"Cumulative P&L:   {profit_sign}£{profit:.2f}  (win + place)",
         f"Banked profit:    £{state.get('banked_profit', 0.0):.2f}",
-        f"Current tier:     £{get_stake(profit):.0f}/horse",
-        f"Next tier at:     £{_next_tier_threshold(profit):.0f} profit",
+        f"Tier pots:\n{tier_profit_summary(state)}",
     ]
 
     if paper_bets:
@@ -1422,34 +1338,17 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
         for r in sorted(qualifying, key=lambda x: x.get("off", "99:99")):
             top1    = r.get("top1") or {}
             top2    = r.get("top2") or {}
-            # Re-verify SUPREME gate using all_runners
-            tier = r.get("tier", 0)
-            if tier == TIER_SUPREME:
-                from predict_v2 import race_confidence
-                from predict import score_runner as _score_runner
-                _runners = r.get("all_runners") or []
-                if _runners:
-                    _scored = sorted([{**ru, "score": _score_runner(ru)[0]} for ru in _runners],
-                                     key=lambda x: -x["score"])
-                    _raw2 = {**r, "runners": _scored}
-                    _tier, _ = race_confidence(_raw2, _scored[0]["score"] if _scored else 0)
-                    if _tier != TIER_SUPREME:
-                        tier = _tier
-            tsr_m   = " 🔥" if (is_tsr_trigger(r) and tier == TIER_SUPREME) else ""
+            tier    = r.get("tier", 0)
             badge   = (r.get("tier_label") or "·").split()[0]
-            if tier != r.get("tier", 0):
-                badge = {2: "🔥🔥", 1: "🔥", 0: "·", -1: "✗"}.get(tier, "·")
             a_price = top1.get("sp_dec")
             b_price = top2.get("sp_dec")
-            p2_sc   = _pick2_score(r)
-            gap     = _score_gap(r)
+            r_tier  = r.get("tier", 0)
+            r_profit = get_tier_profit(state, r_tier)
+            n_r     = len(r.get("all_runners") or [])
             if a_price and b_price:
-                s_a, s_b = pick_stakes(
-                    profit, is_tsr_trigger(r), a_price, b_price,
-                    tier=r.get("tier", 0), pick2_score=p2_sc, score_gap=gap
-                )
+                s_a, s_b, _ = pick_stakes(r_profit, r_tier, a_price, b_price, n_runners=n_r)
             else:
-                s_a = 2.0 if r.get("tier", 0) in {2, -1} else get_stake(profit)
+                s_a = get_stake(r_profit, r_tier)
                 s_b = s_a
             off_dt  = _parse_off_dt(r)
             bet_at  = (off_dt - timedelta(minutes=BET_BEFORE_MINUTES) + timedelta(hours=1)).strftime("%H:%M") if off_dt else "?"
