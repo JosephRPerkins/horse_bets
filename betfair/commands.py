@@ -173,7 +173,7 @@ def _races_status(state: dict = None) -> str:
         s_a, s_b, s_p = pick_stakes(profit, tier, a_price, b_price, n_runners=n_r)
 
         p1_note    = " ⚠️odds-on" if (a_price and a_price < MIN_PICK1_PRICE) else ""
-        p2_note    = " ⚠️<2/1" if (b_price and b_price is not None and b_price < MIN_PICK2_PRICE) else ""
+        p2_note    = " ⚠️under 2/1" if (b_price and b_price is not None and b_price < MIN_PICK2_PRICE) else ""
         place_note = f" 📍£{s_p:.0f}" if s_p > 0 else ""
         paused_note = " ⏸️" if _is_tier_paused(state or {}, tier) else ""
 
