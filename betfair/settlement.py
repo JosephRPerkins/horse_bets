@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
 
 from .api     import get_balance, get_bsp_matched_price, _norm_horse, COMMISSION
-from .state   import save, update_cumulative_profit
+from .state   import save, update_cumulative_profit, update_tier_profit, tier_profit_summary
 from .notify  import send
 
 logger         = logging.getLogger("betfair.settlement")
@@ -135,16 +135,12 @@ def _log_to_tier_tracker(race_id, race_label, race, bets, results, places):
         logger.error(f"tier_tracker log failed for {race_label}: {e}")
 
 
-def _next_tier_threshold(profit: float) -> float:
+def _next_tier_threshold(profit: float, tier: int = 0) -> float:
     try:
-        from betfair.strategy import STAKE_TIERS
-        for min_profit, _, _ in STAKE_TIERS:
-            if profit < min_profit:
-                return float(min_profit)
-        return float(STAKE_TIERS[-1][0])
+        from betfair.strategy import next_tier_threshold
+        return next_tier_threshold(profit, tier)
     except Exception:
         return 0.0
-
 
 def settle_race(placement_ts: str, race_id: str, race_label: str,
                 race_off_iso: str, balance_before: float,
@@ -304,6 +300,14 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
     milestone_alerts = update_cumulative_profit(state, combined_pnl)
     for alert in milestone_alerts:
         send(alert)
+
+    # ── Per-tier profit update ────────────────────────────────────────────────
+    race_tier = (race or {}).get("tier")
+    if race_tier is not None:
+        tier_alerts = update_tier_profit(state, race_tier, combined_pnl)
+        for alert in tier_alerts:
+            send(alert)
+
     save(state)
 
     # ── Circuit breaker — read REAL Betfair balance ───────────────────────────
@@ -410,7 +414,19 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
     )
     lines.append(f"Day Win P&L:     {day_sign}£{state['daily_pnl']:.2f}")
     lines.append(f"Cumulative P&L:  {cum_sign}£{cum_profit:.2f}")
-    lines.append(f"Next tier at:    £{_next_tier_threshold(cum_profit):.0f} profit")
+    race_tier = (race or {}).get("tier")
+    if race_tier is not None:
+        tier_profit = state.get("tier_profit", {}).get(str(race_tier), 0.0)
+        tier_next   = _next_tier_threshold(tier_profit, race_tier)
+        from betfair.strategy import get_stake
+        tier_stake  = get_stake(tier_profit, race_tier)
+        tier_names  = {4: "ELITE", 3: "STRONG", 2: "GOOD"}
+        tname       = tier_names.get(race_tier, f"Tier {race_tier}")
+        t_sign      = "+" if tier_profit >= 0 else ""
+        lines.append(
+            f"{tname} pot:       {t_sign}£{tier_profit:.2f}  "
+            f"(stake £{tier_stake:.0f}, next @ £{tier_next:.0f})"
+        )
 
     send("\n".join(lines))
     logger.info(
