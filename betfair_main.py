@@ -401,7 +401,7 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
         try:
             from utils.tier_tracker import log_result
             tier     = race.get("tier")
-            tsr_solo = race.get("tsr_solo", False)
+            tsr_solo = False
             if tier is not None and len(bet_results) >= 1:
                 win1 = bet_results[0][1] if len(bet_results) > 0 else False
                 win2 = bet_results[1][1] if len(bet_results) > 1 else False
@@ -615,10 +615,10 @@ def _live_bet_job(race: dict, state: dict):
         send(f"⏭️ 💰 <b>SKIP - {race_label}</b>\n⚠️ {liq_reason}")
         return
 
-    tsr_tag = " 🔥 TSR" if tsr else ""
+    tsr_tag    = ""
     lines = [
         f"💰 <b>LIVE BET - {race_label}</b>",
-        f"{tier_label}{tsr_tag}",
+        f"{tier_label}",
         f"Balance: £{balance:.2f} | Profit: £{profit:.2f} | Tier: £{get_stake(profit):.0f}/horse",
         "------------------------------",
     ]
@@ -655,7 +655,7 @@ def _live_bet_job(race: dict, state: dict):
                 return bet
             lines.append(f"❌ {label}: {horse} - BSP order rejected")
             return None
-        min_price = 1.2 if tsr else MIN_BACK_PRICE
+        min_price = MIN_BACK_PRICE
         if not live_price or live_price < min_price:
             lines.append(f"⚠️ {label}: {horse} - no viable price ({live_price})")
             return None
@@ -674,7 +674,7 @@ def _live_bet_job(race: dict, state: dict):
         lines.append(f"❌ {label}: {horse} - rejected by Betfair")
         return None
 
-    a_label = "⭐ Pick 1 (TSR)" if tsr else "⭐ Pick 1"
+    a_label = "⭐ Pick 1"
     bet_a = _try_back(a_sel_id, a_name, actual_a, a_label, a_live, liq_a, lay_liq=lay_liq_a, use_bsp=True)
     bet_b = _try_back(b_sel_id, b_name, actual_b, "🔵 Pick 2", b_live, liq_b, lay_liq=lay_liq_b, use_bsp=True)
 
@@ -973,12 +973,12 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
 
     # ── Build bet notification ────────────────────────────────────────────────
     paper_bets = []
-    tsr_tag    = " 🔥 TSR" if tsr else ""
+    tsr_tag    = ""
     p_stake    = get_place_stake(profit, tier)
 
     lines = [
         f"📝 <b>PAPER BET - {race_label}</b>",
-        f"{tier_label}{tsr_tag}",
+        f"{tier_label}",
         f"Balance: £{balance:.2f} | Profit: £{profit:.2f} | "
         f"Win: £{get_stake(profit):.0f}/horse | Place: £{p_stake:.0f}/horse",
         "------------------------------",
@@ -1013,7 +1013,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                 "horse": horse, "price": None, "stake": stake,
                 "label": label, "bsp": True,
             })
-        elif price and price > (1.2 if tsr else 1.0):
+        elif price and price > MIN_BACK_PRICE:
             required = round(stake * (price - 1), 2)
             lay_liq  = lay_liq_a if horse == a_name else lay_liq_b
             lay_ok   = "✅" if lay_liq >= required else "⚠️"
@@ -1028,7 +1028,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
         else:
             lines.append(f"⚠️ {label}: {horse} - no usable price")
 
-    a_label = "⭐ Pick 1 (TSR)" if tsr else "⭐ Pick 1"
+    a_label = "⭐ Pick 1"
     _log_win(a_name, actual_a, a_live, liq_a, a_label, use_bsp=use_bsp_a)
     _log_win(b_name, actual_b, b_live, liq_b, "🔵 Pick 2", use_bsp=use_bsp_b)
 
