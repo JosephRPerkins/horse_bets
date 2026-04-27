@@ -98,7 +98,7 @@ def pre_race_job(race_id: str):
         logger.warning(f"pre_race_job: {race_id} — no active runners after NR filter")
         return
 
-    # Re-score active runners
+    # Re-score active runners — kept for signals/flags display
     rescored = []
     for r in active:
         sc, signals = score_runner(r)
@@ -111,28 +111,24 @@ def pre_race_job(race_id: str):
         })
     rescored.sort(key=lambda r: (-r.get("score", 0), r.get("sp_dec") or 999))
 
-    horse_a = rescored[0] if len(rescored) >= 1 else None
-    horse_b = rescored[1] if len(rescored) >= 2 else None
-
-    if not horse_a:
-        return
-
     field_size  = len(active)
     std_places  = place_terms(field_size)
     cons_places = conservative_place_terms(field_size)
 
-    # Re-run tier with active runners
+    # System C tier + blended picks from active runners
+    from predict_v2 import get_blended_picks, TIER_LABELS
     going_raw = race_data.get("going", "")
     surface   = derive_surface({**race_data, "going": going_raw})
-    race_for_tier = {
-        "type":    race_data.get("type", "Unknown"),
+    raw_race_meta = {
+        "class":   race_data.get("race_class", ""),
         "surface": surface,
-        "class":   race_data.get("race_class", "Unknown"),
-        "runners": active,
-        "dist_f":  race_data.get("dist", ""),
+        "type":    race_data.get("type", "Unknown"),
     }
-    win_score = horse_a.get("score", 0)
-    tier, tier_reasons = race_confidence(race_for_tier, win_score)
+    tier, horse_a, horse_b, tier_reasons = get_blended_picks(
+        active, mw_p1=0.60, mw_p2=0.40, raw_race=raw_race_meta
+    )
+    if not horse_a:
+        return
 
     # Get exchange odds from Betfair stub (returns {} until implemented)
     horse_ids     = [r.get("horse_id", "") for r in active]
