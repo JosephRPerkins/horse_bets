@@ -1158,7 +1158,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
 def bet_job(race: dict, state: dict):
     from betfair.commands import is_betting_allowed
     from predict_v2 import get_blended_picks, TIER_LABELS
-    from predict import is_non_runner
+    from utils.helpers import is_non_runner
 
     # ── Re-pick from active runners at bet time ───────────────────────────────
     # Removes non-runners and re-runs System C blended picks so top1/top2
