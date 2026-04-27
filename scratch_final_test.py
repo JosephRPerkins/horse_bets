@@ -384,11 +384,11 @@ def simulate_current():
 # RUN SIMULATIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-print("Running revised system (all filters)...")
-rev_stats, rev_profit, rev_dd, rev_streak, rev_days = simulate(use_rpr_filter=True, use_field_cap=True)
+print("Running revised system (no RPR filter — history raw data lacks RPR after Apr 13)...")
+rev_stats, rev_profit, rev_dd, rev_streak, rev_days = simulate(use_rpr_filter=False, use_field_cap=True)
 
-print("Running revised system (no RPR filter, for comparison)...")
-nofilter_stats, nofilter_profit, _, _, _ = simulate(use_rpr_filter=False, use_field_cap=True)
+print("Running revised system (RPR filter applied, for reference)...")
+filtered_stats, filtered_profit, _, _, _ = simulate(use_rpr_filter=True, use_field_cap=True)
 
 print("Running current model...")
 cur_stats, cur_total = simulate_current()
@@ -452,23 +452,34 @@ print()
 print(f"  {'Tier':<10} {'MaxDrawdown':>13} {'MaxStreak':>11} {'FinalProfit':>13}")
 print(f"  {'-'*50}")
 for tc,tl in [(4,"ELITE"),(3,"STRONG"),(2,"GOOD")]:
-    print(f"  {tl:<10} {rev_dd.get(tc,0):>+13.2f} {rev_streak.get(tc,0):>11}  {rev_profit.get(tc,0):>+13.2f}")
+    print(f"  {tl:<10} {-rev_dd.get(tc,0):>+13.2f} {rev_streak.get(tc,0):>11}  {rev_profit.get(tc,0):>+13.2f}")
 print()
 
-# ── Effect of RPR filter ──────────────────────────────────────────────────────
+# ── Diagnostic: sanity check GOOD tier place rates ────────────────────────────
+print(f"  DIAGNOSTIC — GOOD tier place breakdown (should not be 0% neither-placed):")
+s = rev_stats.get("GOOD",{})
+n = s.get("n",0)
+if n:
+    print(f"    P2 place rate: {s.get('p2p',0)/n*100:.1f}%  "
+          f"Either placed: {s.get('either_p',0)/n*100:.1f}%  "
+          f"Neither placed: {s.get('neither_p',0)/n*100:.1f}%")
+    print(f"    Note: GOOD has no place bets so place P&L=0 is correct.")
+    print(f"    High P2 place rate at mw=0.40 may reflect P2 being near-favourite.")
 print("╔══════════════════════════════════════════════════════════════════════════╗")
-print("║  EFFECT OF RPR FILTER (with vs without)                                 ║")
+print("║  EFFECT OF RPR FILTER (without vs with — for live deployment context)  ║")
+print("║  NOTE: history raw data has 0% RPR after Apr 13. Filter only valid     ║")
+print("║  for live use where card data has 86-92% RPR coverage.                 ║")
 print("╚══════════════════════════════════════════════════════════════════════════╝")
 print()
-print(f"  {'Tier':<10} {'N(filt)':>9} {'N(nofilt)':>11} {'P&L(filt)':>11} {'P&L(nofilt)':>13} {'Delta':>8}")
-print(f"  {'-'*58}")
+print(f"  {'Tier':<10} {'N(no filt)':>11} {'N(filtered)':>13} {'P&L(nofilt)':>13} {'P&L(filt)':>11} {'Races removed':>14}")
+print(f"  {'-'*68}")
 for tl in ["ELITE","STRONG","GOOD"]:
-    sf = rev_stats.get(tl,{})
-    sn = nofilter_stats.get(tl,{})
-    nf = sf.get("n",0); nn = sn.get("n",0)
-    pf = sf.get("p1_win_pnl",0)+sf.get("p2_win_pnl",0)+sf.get("p1_plc_pnl",0)+sf.get("p2_plc_pnl",0)
+    sn = rev_stats.get(tl,{})
+    sf = filtered_stats.get(tl,{})
+    nn = sn.get("n",0); nf = sf.get("n",0)
     pn = sn.get("p1_win_pnl",0)+sn.get("p2_win_pnl",0)+sn.get("p1_plc_pnl",0)+sn.get("p2_plc_pnl",0)
-    print(f"  {tl:<10} {nf:>9} {nn:>11} {pf:>+11.2f} {pn:>+13.2f} {pf-pn:>+8.2f}")
+    pf = sf.get("p1_win_pnl",0)+sf.get("p2_win_pnl",0)+sf.get("p1_plc_pnl",0)+sf.get("p2_plc_pnl",0)
+    print(f"  {tl:<10} {nn:>11} {nf:>13} {pn:>+13.2f} {pf:>+11.2f} {nn-nf:>14}")
 print()
 
 # ── vs Current model ──────────────────────────────────────────────────────────
