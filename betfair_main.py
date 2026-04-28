@@ -1167,8 +1167,12 @@ def bet_job(race: dict, state: dict):
             }
 
     tier = race.get("tier", 0)
-    if not is_betting_allowed(state, tier):
-        logger.info(f"Paused - skipping {race.get('off')} {race.get('course')}")
+    mode = state.get("mode", "paper")
+    live_allowed  = is_betting_allowed(state, tier, live=True)
+    paper_allowed = is_betting_allowed(state, tier, live=False)
+
+    if not paper_allowed and not live_allowed:
+        logger.info(f"Globally paused - skipping {race.get('off')} {race.get('course')}")
         return
     now_utc = datetime.now(timezone.utc)
     off_utc = _to_utc(race.get("off_dt", ""))
@@ -1178,10 +1182,13 @@ def bet_job(race: dict, state: dict):
             f"Race already started at job fire time."
         )
         return
-    mode = state.get("mode", "paper")
     if mode == "live":
-        _live_bet_job(race, state)
-        _paper_bet_job(race, state, silent=True)
+        if live_allowed:
+            _live_bet_job(race, state)
+        else:
+            logger.info(f"Live bet paused for tier {tier} — running paper only")
+            send(f"⏸️ Live bet paused ({TIER_LABELS.get(tier,'?').strip()}) — paper tracking only")
+        _paper_bet_job(race, state, silent=False)
     else:
         _paper_bet_job(race, state, silent=False)
 
