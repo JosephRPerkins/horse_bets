@@ -125,14 +125,18 @@ def _set_tier_paused(state: dict, tier: int, paused: bool):
         save(state)
 
 
-def is_betting_allowed(state: dict, tier: int) -> bool:
+def is_betting_allowed(state: dict, tier: int, live: bool = False) -> bool:
     """
     Return True if betting is allowed for this race.
-    Checks global pause flag AND tier-specific pause flag.
+
+    live=False (paper): only blocked by global /stop. Tier pause flags
+    and circuit breaker do NOT affect paper — it always runs as a shadow.
+
+    live=True: blocked by global pause, tier-specific pause, or circuit breaker.
     """
     if state.get("betting_paused", False):
         return False
-    if _is_tier_paused(state, tier):
+    if live and _is_tier_paused(state, tier):
         return False
     return True
 
