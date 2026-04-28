@@ -78,13 +78,13 @@ HELP_TEXT = """\
 /stop    — pause ALL betting
 /start   — resume ALL betting
 
-<b>Tier controls</b>
-/startelite   — resume ELITE tier
-/stopelite    — pause ELITE tier
-/startstrong  — resume STRONG tier
-/stopstrong   — pause STRONG tier
-/startgood    — resume GOOD tier
-/stopgood     — pause GOOD tier
+<b>Tier controls (live bets only — paper always runs)</b>
+/startelite   — resume ELITE live bets
+/stopelite    — pause ELITE live bets
+/startstrong  — resume STRONG live bets
+/stopstrong   — pause STRONG live bets
+/startgood    — resume GOOD live bets
+/stopgood     — pause GOOD live bets
 
 <b>Profit management</b>
 /resetprofit  — reset all P&L + tier pots (use before going live)
@@ -276,9 +276,10 @@ def handle_command(cmd: str, state: dict) -> None:
         stake  = get_stake(profit, tier)
         nxt    = next_tier_threshold(profit, tier)
         sign   = "+" if profit >= 0 else ""
-        action = "⏸️ paused" if pausing else "▶️ resumed"
+        action = "⏸️ live paused" if pausing else "▶️ live resumed"
         send(
-            f"{badge} <b>{tname} betting {action}</b>\n"
+            f"{badge} <b>{tname} {action}</b>\n"
+            f"Paper tracking continues regardless.\n"
             f"Pot: {sign}£{profit:.2f} | Stake: £{stake:.0f} | Next: £{nxt:.0f}"
         )
         logger.info(f"{tname} betting {'paused' if pausing else 'resumed'}")
