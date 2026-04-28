@@ -38,7 +38,7 @@ from predict_v2 import (
 
 MIN_PICK1_PRICE = 1.20   # back P1 at almost any odds
 MIN_PICK2_PRICE = 2.00   # P2 must offer some value
-MIN_BACK_PRICE  = 1.50   # exchange minimum meaningful odds
+MIN_BACK_PRICE  = 1.05   # exchange minimum — BSP always fills regardless
 MIN_LIQUIDITY   = 2.00   # minimum matched volume before placing
 
 # ── Going / surface filters ────────────────────────────────────────────────────
