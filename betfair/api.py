@@ -401,25 +401,35 @@ def place_bsp(market_id: str, selection_id: int, stake: float) -> dict | None:
 
 def get_bsp_matched_price(bet_id: str) -> float | None:
     """
-    Poll listCurrentOrders to retrieve the BSP matched price for a bet.
-    Call this after race start — BSP orders settle within a few minutes.
-    Returns the matched price as a float, or None if not yet settled.
+    Get BSP matched price for a bet. Tries listClearedOrders first
+    (authoritative, works after settlement), falls back to listCurrentOrders
+    (works while order is still current, pre-settlement).
+    Returns the matched price as a float, or None if unavailable.
     """
     try:
-        orders = get_client().betting.list_current_orders(
-            bet_ids = [bet_id],
+        # Try cleared orders first — authoritative post-settlement price
+        cleared = get_client().betting.list_cleared_orders(
+            bet_status = "SETTLED",
+            bet_ids    = [bet_id],
         )
-        if not orders or not orders.current_orders:
-            return None
-        order = orders.current_orders[0]
-        price = getattr(order, "bsp_liability", None)
-        avg   = getattr(order, "average_price_matched", None)
-        if avg and float(avg) > 1.0:
-            return round(float(avg), 2)
-        return None
+        if cleared and cleared.orders:
+            avg = getattr(cleared.orders[0], "average_price_matched", None)
+            if avg and float(avg) > 1.0:
+                return round(float(avg), 2)
+    except Exception as e:
+        logger.debug(f"get_bsp_matched_price cleared_orders error: {e}")
+
+    try:
+        # Fall back to current orders (pre-settlement)
+        orders = get_client().betting.list_current_orders(bet_ids=[bet_id])
+        if orders and orders.current_orders:
+            avg = getattr(orders.current_orders[0], "average_price_matched", None)
+            if avg and float(avg) > 1.0:
+                return round(float(avg), 2)
     except Exception as e:
         logger.error(f"get_bsp_matched_price error: {e}")
-        return None
+
+    return None
 
 
 def get_cleared_order(bet_id: str) -> dict | None:
