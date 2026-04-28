@@ -420,3 +420,48 @@ def get_bsp_matched_price(bet_id: str) -> float | None:
     except Exception as e:
         logger.error(f"get_bsp_matched_price error: {e}")
         return None
+
+
+def get_cleared_order(bet_id: str) -> dict | None:
+    """
+    Query listClearedOrders to get exact settlement data for a placed bet.
+    Returns dict with keys: price, profit, size_settled, won
+    or None if not yet settled or not found.
+
+    This is the authoritative source for BSP settlement — returns the actual
+    BSP auction price, not an estimate. Use this instead of sp_dec from
+    Racing API wherever a bet_id is available.
+
+    Call this after race settlement (~T+15min). The order remains queryable
+    indefinitely in listClearedOrders.
+    """
+    try:
+        cleared = get_client().betting.list_cleared_orders(
+            bet_status  = "SETTLED",
+            bet_ids     = [bet_id],
+        )
+        if not cleared or not cleared.orders:
+            return None
+        order = cleared.orders[0]
+        price   = getattr(order, "price_requested", None)
+        # For BSP bets, price_requested is 0. Use average_price_matched.
+        avg     = getattr(order, "average_price_matched", None)
+        profit  = getattr(order, "profit", None)
+        settled = getattr(order, "size_settled", None)
+        won     = profit is not None and float(profit) > 0
+
+        actual_price = None
+        if avg and float(avg) > 1.0:
+            actual_price = round(float(avg), 2)
+        elif price and float(price) > 1.0:
+            actual_price = round(float(price), 2)
+
+        return {
+            "price":        actual_price,
+            "profit":       round(float(profit), 2) if profit is not None else None,
+            "size_settled": round(float(settled), 2) if settled is not None else None,
+            "won":          won,
+        }
+    except Exception as e:
+        logger.error(f"get_cleared_order error for {bet_id}: {e}")
+        return None
