@@ -293,12 +293,28 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
 
         # For BSP bets use Racing API SP as settlement price
         if is_bsp:
-            price = _get_sp_from_result(result, horse)
-            if price:
-                lines.append(f"🔄 {label} {horse} — BSP settled @ {price:.2f}")
+            sp_price  = _get_sp_from_result(result, horse)
+            bsp_price = None
+            bet_id    = bet.get("bet_id", "")
+            if bet_id:
+                from betfair.api import get_cleared_order
+                cleared = get_cleared_order(bet_id)
+                if cleared and cleared.get("price"):
+                    bsp_price = cleared["price"]
+            price = bsp_price or sp_price or bet.get("price") or 2.0
+            if bsp_price and sp_price:
+                diff = round(bsp_price - sp_price, 2)
+                sign = "+" if diff >= 0 else ""
+                lines.append(
+                    f"🔄 {label} {horse} — BSP @ {bsp_price:.2f} "
+                    f"(SP {sp_price:.2f}, diff {sign}{diff:.2f})"
+                )
+            elif bsp_price:
+                lines.append(f"🔄 {label} {horse} — BSP @ {bsp_price:.2f}")
+            elif sp_price:
+                lines.append(f"⚠️ {label} {horse} — BSP unavailable, using SP {sp_price:.2f}")
             else:
-                price = bet.get("price") or 2.0
-                lines.append(f"⚠️ {label} {horse} — BSP price unavailable, using {price:.2f}")
+                lines.append(f"⚠️ {label} {horse} — no price available, using 2.0")
         else:
             price = bet["price"]
 
