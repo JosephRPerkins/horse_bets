@@ -218,16 +218,30 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
         # BSP bets have price=0 at placement. Poll Betfair for matched price.
         # Falls back to Racing API sp_dec if lookup fails or returns None.
         if is_bsp:
-            price = None
+            price     = None
+            sp_price  = _get_sp_from_result(result, horse)  # Racing API SP for comparison
             if bet_id:
-                price = get_bsp_matched_price(bet_id)
+                cleared = get_cleared_order(bet_id)
+                if cleared and cleared.get("price"):
+                    price = cleared["price"]
+                    if sp_price:
+                        diff = round(price - sp_price, 2)
+                        sign = "+" if diff >= 0 else ""
+                        logger.info(
+                            f"{race_label}: BSP {horse} @ {price:.2f} "
+                            f"(SP was {sp_price:.2f}, diff {sign}{diff:.2f})"
+                        )
+                    else:
+                        logger.info(f"{race_label}: BSP {horse} settled @ {price:.2f}")
             if not price:
-                price = _get_sp_from_result(result, horse)
+                price = sp_price
+                if price:
+                    logger.info(f"{race_label}: {horse} — BSP unavailable, using SP {price:.2f}")
             if not price:
-                price = 2.0  # last resort fallback
-                logger.warning(f"{race_label}: BSP price unavailable for {horse}, using 2.0")
-            else:
-                logger.info(f"{race_label}: BSP {horse} settled @ {price:.2f}")
+                price = 2.0
+                logger.warning(f"{race_label}: BSP+SP unavailable for {horse}, using 2.0")
+            bet["_sp_price"] = sp_price   # store for notification display
+            bet["_bsp_price"] = price
         else:
             price = bet.get("price", 1.0)
 
@@ -376,12 +390,18 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
     ]
 
     for bet, won, pnl, price, detail in results:
-        b_icon = "✅" if won else "❌"
-        label  = bet.get("label", "")
-        is_bsp = bet.get("bsp", False)
+        b_icon  = "✅" if won else "❌"
+        label   = bet.get("label", "")
+        is_bsp  = bet.get("bsp", False)
+        sp_comp = ""
+        if is_bsp and bet.get("_sp_price"):
+            sp    = bet["_sp_price"]
+            diff  = round(price - sp, 2)
+            sign  = "+" if diff >= 0 else ""
+            sp_comp = f" (SP {sp:.2f}, BSP diff {sign}{diff:.2f})"
         bsp_tag = " [BSP]" if is_bsp else ""
         lines.append(
-            f"{b_icon} {label} {bet['horse']} @ {price:.2f}{bsp_tag} — {detail}"
+            f"{b_icon} {label} {bet['horse']} @ {price:.2f}{bsp_tag}{sp_comp} — {detail}"
         )
 
     if place_results:
