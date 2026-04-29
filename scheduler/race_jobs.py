@@ -231,11 +231,32 @@ def poll_all_results():
 
 def _send_result(race: dict, result: dict):
     """Build and send the result notification for one race."""
-    top1        = race.get("top1")
-    top2        = race.get("top2")
     std_places  = race.get("places", 3)
     cons_places = race.get("cons_places", 4)
-    tier        = race.get("tier", 0)
+
+    # Re-run blended picks using result runners (actual SP) so the result
+    # notification matches what was bet on, not the overnight card picks.
+    result_runners = result.get("runners", [])
+    if result_runners:
+        try:
+            from predict_v2 import get_blended_picks
+            raw_meta = {
+                "class":   race.get("race_class") or race.get("class", ""),
+                "surface": race.get("surface", "Turf"),
+                "type":    race.get("type", "Unknown"),
+            }
+            tier, top1, top2, _ = get_blended_picks(
+                result_runners, mw_p1=0.60, mw_p2=0.40, raw_race=raw_meta
+            )
+        except Exception as e:
+            logger.warning(f"_send_result: re-pick failed, using card picks: {e}")
+            top1 = race.get("top1")
+            top2 = race.get("top2")
+            tier = race.get("tier", 0)
+    else:
+        top1 = race.get("top1")
+        top2 = race.get("top2")
+        tier = race.get("tier", 0)
 
     if not top1:
         return
