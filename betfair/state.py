@@ -121,6 +121,11 @@ def reset_daily(state: dict) -> dict:
     state["paper_place_pnl"]  = 0.0
     state["profit_history"]   = []
     state["circuit_paused"]   = False
+    # Auto-resume EOD loss pause at midnight — if user wanted to stay paused
+    # they should send /stop explicitly
+    if state.get("betting_paused", False) and not state.get("manual_stop", False):
+        state["betting_paused"] = False
+        logger.info("Auto-resumed betting at midnight after EOD loss pause")
 
     mode = state.get("mode", "paper")
 
