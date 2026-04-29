@@ -324,7 +324,8 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
 
     save(state)
 
-    # ── Circuit breaker — read REAL Betfair balance ───────────────────────────
+                  
+    # ── Balance logging (live mode) ───────────────────────────────────────────
     try:
         real_balance = get_balance()
         history = state.get("profit_history", [])
@@ -333,16 +334,8 @@ def settle_race(placement_ts: str, race_id: str, race_label: str,
             history = history[-10:]
         state["profit_history"] = history
         save(state)
-
-        from betfair.state import check_circuit_breaker
-        saved_profit = state.get("cumulative_profit", 0.0)
-        state["cumulative_profit"] = real_balance
-        circuit_alert = check_circuit_breaker(state)
-        state["cumulative_profit"] = saved_profit
-        if circuit_alert:
-            send(circuit_alert)
     except Exception as e:
-        logger.error(f"Circuit breaker check failed: {e}")
+        logger.error(f"Balance history update failed: {e}")
 
     cum_profit = state.get("cumulative_profit", 0.0)
 
