@@ -238,12 +238,14 @@ def handle_command(cmd: str, state: dict) -> None:
 
     elif cmd == "/stop":
         state["betting_paused"] = True
+        state["manual_stop"]    = True
         save(state)
         send("⏸️ <b>All betting paused</b>\nNo new bets will be placed.\nSend /start to resume.")
         logger.info("All betting paused")
 
     elif cmd == "/start":
         state["betting_paused"] = False
+        state["manual_stop"] = False
         save(state)
         mode = state.get("mode", "paper").upper()
         bal  = get_balance()
@@ -329,6 +331,7 @@ def handle_command(cmd: str, state: dict) -> None:
             send("ℹ️ Betting is not currently paused.")
             return
         state["betting_paused"] = False
+        state["manual_stop"] = False
         state["circuit_paused"] = False
         save(state)
         bal = get_balance()
