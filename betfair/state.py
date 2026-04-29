@@ -364,3 +364,21 @@ def check_circuit_breaker(state: dict) -> str | None:
         )
 
     return None
+
+
+def eod_loss_check(state: dict, combined_pnl: float) -> str | None:
+    """
+    End-of-day loss check. If the day ended in a net loss, pause betting
+    and request confirmation to continue. Returns alert string if triggered.
+    Called from end_of_day_job only.
+    """
+    if combined_pnl >= 0:
+        return None
+    state["betting_paused"] = True
+    save(state)
+    return (
+        f"📉 <b>Day ended at a loss: {'+' if combined_pnl >= 0 else ''}£{combined_pnl:.2f}</b>\n"
+        f"Betting paused for tomorrow.\n"
+        f"Send /continue to resume betting, or /stop to remain paused.\n"
+        f"Resets automatically at midnight if no response."
+    )
