@@ -95,6 +95,7 @@ HELP_TEXT = """\
 /streakstop   — disable streak betting
 /streakstatus — stake, P&L, win streak
 
+/continue     — resume betting after end-of-day loss pause
 /breaker      — override circuit breaker and resume
 
 /status       — full status: balance, mode, tier pots
@@ -323,6 +324,22 @@ def handle_command(cmd: str, state: dict) -> None:
         )
         logger.info("Tier pots reset")
 
+    elif cmd == "/continue":
+        if not state.get("betting_paused", False):
+            send("ℹ️ Betting is not currently paused.")
+            return
+        state["betting_paused"] = False
+        state["circuit_paused"] = False
+        save(state)
+        bal = get_balance()
+        send(
+            f"▶️ <b>Betting resumed</b>\n"
+            f"Continuing after yesterday's loss.\n"
+            f"Balance: £{bal:.2f}\n"
+            f"Good luck today."
+        )
+        logger.info("Betting resumed via /continue after EOD loss pause")
+  
     elif cmd == "/breaker":
         if not state.get("circuit_paused", False):
             send("ℹ️ Circuit breaker is not currently active.")
