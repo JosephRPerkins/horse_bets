@@ -458,13 +458,7 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
         "total_pnl": round(total_pnl, 2),
     })
     save(state)
-
-    # ── Circuit breaker check — paper mode only ───────────────────────────────
-    if not silent:
-        from betfair.state import check_circuit_breaker
-        circuit_alert = check_circuit_breaker(state)
-        if circuit_alert:
-            send(circuit_alert)
+                    
 
     if silent:
         logger.info(
@@ -1266,6 +1260,13 @@ def end_of_day_job(state: dict):
         "==============================",
     ]
     send_chunks("\n".join(lines))
+
+    # ── End-of-day loss check ─────────────────────────────────────────────────
+    from betfair.state import eod_loss_check
+    combined_day = round(paper_pnl + paper_place, 2)
+    loss_alert = eod_loss_check(state, combined_day)
+    if loss_alert:
+        send(loss_alert)
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
