@@ -312,9 +312,11 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
             elif bsp_price:
                 lines.append(f"🔄 {label} {horse} — BSP @ {bsp_price:.2f}")
             elif sp_price:
-                lines.append(f"⚠️ {label} {horse} — BSP unavailable, using SP {sp_price:.2f}")
+                lines.append(f"📝 {label} {horse} — settled @ SP {sp_price:.2f}")
             else:
-                lines.append(f"⚠️ {label} {horse} — no price available, using 2.0")
+                lines.append(f"⏭️ {label} {horse} — no price (late NR?) — stake voided")
+                bet_results.append((bet, None))
+                continue
         else:
             price = bet["price"]
 
@@ -866,10 +868,16 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     a_live = a_info.get("back") or top1.get("sp_dec")
     b_live = b_info.get("back") or top2.get("sp_dec")
 
-    if a_live is None or b_live is None:
-        logger.error(
-            f"Missing prices: a_live={a_live}, b_live={b_live} — skipping bet"
-        )
+    # No exchange price = late NR — force into NR promotion logic below
+    if mkt_ok and a_live is None:
+        if not silent:
+            send(f"⚠️ 📝 {race_label}\n⭐ Pick 1 {a_name} — no price, treating as late NR")
+        a_info = {"status": "REMOVED"}
+    if mkt_ok and b_live is None:
+        b_info = {"status": "REMOVED"}
+
+    if a_live is None and not mkt_ok:
+        logger.error(f"No prices and no market for {race_label} — skipping")
         return
       
     # liq variables kept for apply_liquidity stub compatibility only
@@ -992,16 +1000,14 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
         if stake == 0:
             return
         if use_bsp:
-            lines.append(
-                f"🔄 {label}: {horse} — BSP £{stake:.2f} "
-                f"(liq too low: £{liq:.0f}, will settle at SP)"
-            )
+            sp_display = f"@ {price:.2f} " if price and price >= 1.01 else ""
+            lines.append(f"📝 {label}: {horse} {sp_display}— £{stake:.0f}")
             paper_bets.append({
                 "horse": horse, "price": None, "stake": stake,
                 "label": label, "bsp": True,
             })
         elif price and price >= 1.01:
-            lines.append(f"📝 {label}: {horse} @ {price:.2f} - paper £{stake:.2f}")
+            lines.append(f"📝 {label}: {horse} @ {price:.2f} — £{stake:.0f}")
             paper_bets.append({
                 "horse": horse, "price": price, "stake": stake,
                 "label": label, "bsp": False,
