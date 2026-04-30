@@ -61,7 +61,7 @@ def _empty() -> dict:
         "streak_wins":         0,
         "streak_best":         0,
         "streak_peak_stake":   2.0,
-        "manual_stop": False
+        "manual_stop": False,
         # ── Per-tier independent profit pots (System C) ──────────────────────
         # Each tier scales stakes from its own pot independently.
         # Keys are string versions of tier integers: "4"=ELITE, "3"=STRONG, "2"=GOOD
