@@ -1344,7 +1344,7 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             f"Paper P&L:        {'+' if paper_pnl >= 0 else ''}£{paper_pnl:.2f}",
             f"Bet timing:       T-{BET_BEFORE_MINUTES} mins",
             "------------------------------",
-            f"Qualifying: {len(qualifying)} | Scheduled: {scheduled}",
+            f"Total races: {len(races)} | Qualifying: {len(qualifying)} | Bets remaining: {scheduled}",
             f"Tiers: {tier_summary or 'none'}",
             f"Filters: Turf | Not Heavy | Not Irish staying chase | Good/Skip capped",
             "------------------------------",
