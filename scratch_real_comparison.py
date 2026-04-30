@@ -74,13 +74,21 @@ for entry in tracker:
 
     matched_race = None
     for race in races:
-        rc  = (race.get("course") or "").lower().replace(" ", "")
-        tc  = course.lower().replace(" ", "").replace("(aw)", "").replace("(ire)", "")
+        rc  = (race.get("course") or "").lower().replace(" ", "").replace("-", "")
+        tc  = course.lower().replace(" ", "").replace("-", "").replace("(aw)", "").replace("(ire)", "")
         off_raw = str(race.get("off") or race.get("off_time") or "").strip()
-        # Normalise single-digit hours
-        if off_raw and ":" in off_raw and len(off_raw.split(":")[0]) == 1:
-            off_raw = "0" + off_raw
-        if tc in rc and off_raw == off:
+        # Raw results are UTC — convert to BST (+1h) and normalise to HH:MM
+        if off_raw and ":" in off_raw:
+            try:
+                parts  = off_raw.split(":")
+                h_bst  = (int(parts[0]) + 1) % 24
+                m      = int(parts[1])
+                off_bst = f"{h_bst:02d}:{m:02d}"
+            except:
+                off_bst = off_raw
+        else:
+            off_bst = off_raw
+        if tc in rc and off_bst == off:
             matched_race = race
             break
 
