@@ -274,6 +274,27 @@ def get_blended_picks(
     elif sc1f >= 1:                        tc = TIER_STD
     else:                                  tc = TIER_WEAK
 
+    # ── For non-ELITE tiers, replace blended P1 with pure score_runner P1 ───────
+    # Real data shows score_runner P1 outperforms blended P1 in STRONG/GOOD/STD/WEAK
+    # (32-36% win rate vs 21-25% for blended when picks differ across 125 races).
+    # ELITE is the exception — blended P1 wins 46% vs old 23% when they differ.
+    if tc != TIER_ELITE:
+        sr_p1 = stats_scored[0][2] if stats_scored else p1
+        if sr_p1.get("horse_id","") != p1_hid:
+            # score_runner picks a different horse — use it as P1
+            # but keep P2 from the blended selection (System C P2 is good)
+            old_p1  = p1
+            p1      = sr_p1
+            p1_hid  = p1.get("horse_id","")
+            # Recalculate rank values for the new P1
+            sr1     = stats_rank.get(p1_hid, n)
+            mr1     = mkt_rank.get(p1_hid, n)
+            # P2: keep System C blended pick, but must not be same as new P1
+            p2 = next(
+                (r for _, _, _, _, r in b2 if r.get("horse_id","") != p1_hid),
+                None
+            )
+
     # ── Build human-readable reasons ────────────────────────────────────────────
     p1_sp  = to_float(p1.get("sp_dec"))
     sp_tag = f" @ {sp_str(p1_sp)}" if p1_sp else ""
