@@ -204,8 +204,10 @@ def get_blended_picks(
     is_jump   = any(t in race_type for t in ("chase", "hurdle", "nh flat", "national hunt"))
     if cls in ("1", "2") and is_jump:
         return TIER_SKIP, None, None, ["Class 1/2 jump — skip"]
-    if n > 12:
-        return TIER_SKIP, None, None, [f"Field of {n} — skip (>12 runners)"]
+    if is_jump and n > 12:
+        return TIER_SKIP, None, None, [f"Jump field of {n} — skip (>12 runners)"]
+    if not is_jump and n > 20:
+        return TIER_SKIP, None, None, [f"Flat field of {n} — skip (>20 runners)"]
     if n < 2:
         r0 = runners[0] if runners else None
         return TIER_STD, r0, None, ["Single runner"]
