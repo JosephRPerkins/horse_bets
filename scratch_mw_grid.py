@@ -161,9 +161,12 @@ for entry in tracker:
                 # p2_blend already excludes p1 from get_blended_picks
                 # but p1 may differ from our mw1 p1 — re-select excluding our p1
                 if p2_blend and p2_blend.get("horse_id","") == p1_hid:
-                    # find next best at mw2
-                    from predict_v2 import _blend_runners
-                    p2 = None  # fallback
+                    # P2 same as our P1 — find next from price order
+                    by_price2 = sorted(
+                        [r for r in runners if tof(r.get("sp_dec")) and r.get("horse_id","") != p1_hid],
+                        key=lambda r: tof(r.get("sp_dec"))
+                    )
+                    p2 = by_price2[0] if by_price2 else None
                 else:
                     p2 = p2_blend
 
