@@ -199,8 +199,11 @@ def get_blended_picks(
     cls      = str(raw_race.get("class", "") or "").replace("Class ", "").strip()
 
     # ── Hard skips ─────────────────────────────────────────────────────────────
-    if cls in ("1", "2"):
-        return TIER_SKIP, None, None, ["Class 1/2 — skip"]
+    # Class 1/2 skip applies to jump races only — Flat Class 1/2 races
+    race_type = str(raw_race.get("type", "") or "").lower()
+    is_jump   = any(t in race_type for t in ("chase", "hurdle", "nh flat", "national hunt"))
+    if cls in ("1", "2") and is_jump:
+        return TIER_SKIP, None, None, ["Class 1/2 jump — skip"]
     if n > 12:
         return TIER_SKIP, None, None, [f"Field of {n} — skip (>12 runners)"]
     if n < 2:
