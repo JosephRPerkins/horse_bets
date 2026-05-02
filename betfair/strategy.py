@@ -55,13 +55,14 @@ ATTRITION_DIST_F  = 20.0
 # Profit tracked independently per tier.
 
 TIER_STAKE_THRESHOLDS = {
-    TIER_ELITE:  [(0, 2.0), (30,  4.0), (60,  6.0)],
+    TIER_ELITE:  [(0, 2.0), (50,  4.0), (100,  6.0)],
     TIER_STRONG: [(0, 2.0), (50,  4.0), (100, 6.0)],
-    TIER_GOOD:   [(0, 2.0), (75,  4.0), (150, 6.0)],
+    TIER_GOOD:   [(0, 2.0), (50,  4.0), (100, 6.0)],
+    TIER_STD:    [(0, 2.0), (50,  4.0), (100, 6.0)],
 }
 
 # Bet tiers — races in these tiers qualify for betting
-BET_TIERS = {TIER_ELITE, TIER_STRONG, TIER_GOOD}
+BET_TIERS = {TIER_ELITE, TIER_STRONG, TIER_GOOD, TIER_STD}
 
 # Place bet tiers — only ELITE and STRONG get place bets
 PLACE_BET_TIERS = {TIER_ELITE, TIER_STRONG}
