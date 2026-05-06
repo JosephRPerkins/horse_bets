@@ -599,10 +599,16 @@ def _live_bet_job(race: dict, state: dict):
     lay_liq_a = 0.0
     lay_liq_b = 0.0
 
+    # Score-based variable staking
+    from predict_v2 import _sp_free_score
+    a_score = _sp_free_score(top1) if top1 else 0
+    b_score = _sp_free_score(top2) if top2 else 0
+
+    stake_a     = win_stake_for_pick(a_live, a_score)
+    stake_b     = 0   # no P2 win bet per staking rules
+    stake_place = place_stake_for_pick(b_score, tier)
+
     n_runners_live = len(race.get("all_runners") or [])
-    stake_a, stake_b, stake_place = pick_stakes(
-        profit, tier, a_live, b_live, n_runners=n_runners_live
-    )
     place_only = False
     if place_only:
         send(f"🐴 💰 {race_label} — two-horse race, place market only (paper tracking)")
@@ -735,7 +741,9 @@ def _live_bet_job(race: dict, state: dict):
       
     # ── Live place bets ───────────────────────────────────────────────────────
     live_place_bets = []
-    p_stake     = get_place_stake(profit, tier)
+    from predict_v2 import _sp_free_score
+    b_score_live = _sp_free_score(top2) if top2 else 0
+    p_stake = place_stake_for_pick(b_score_live, tier)
     cons_places = _race_cons_places(race)
   
     try:
@@ -766,10 +774,8 @@ def _live_bet_job(race: dict, state: dict):
                 place_lines.append("📍 ≤4 runners — place bets skipped (win only)")
                 horses_to_place = []
             else:
-                horses_to_place = [
-                    h for h in [a_name, b_name]
-                    if h and h != "?"
-                ]
+                # Only place bet on P2 per staking rules
+                horses_to_place = [b_name] if b_name and b_name != "?" else []
             for horse in horses_to_place:
                 sel_id = find_selection_id(horse, place_runners)
                 if sel_id is None:
@@ -940,10 +946,16 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
             return
 
     # ── Stake calculation ─────────────────────────────────────────────────────
+    # Score-based variable staking
+    from predict_v2 import _sp_free_score
+    a_score = _sp_free_score(top1) if top1 else 0
+    b_score = _sp_free_score(top2) if top2 else 0
+
+    stake_a     = win_stake_for_pick(a_live, a_score)
+    stake_b     = 0   # no P2 win bet per staking rules
+    stake_place = place_stake_for_pick(b_score, tier)
+
     n_runners_live = len(race.get("all_runners") or [])
-    stake_a, stake_b, stake_place = pick_stakes(
-        profit, tier, a_live, b_live, n_runners=n_runners_live
-    )
     place_only = False
     if not place_only and stake_a == 0 and stake_b == 0:
         if not silent:
@@ -977,13 +989,13 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
 
     # ── Build bet notification ────────────────────────────────────────────────
     paper_bets = []
-    p_stake    = get_place_stake(profit, tier)
+    p_stake = stake_place
 
     lines = [
         f"📝 <b>PAPER BET - {race_label}</b>",
         f"{tier_label}",
         f"Balance: £{balance:.2f} | Profit: £{profit:.2f} | "
-        f"Win: £{get_stake(profit, tier):.0f}/horse | Place: £{p_stake:.0f}/horse",
+        f"P1 win: £{stake_a:.0f} (score={a_score:.0f}) | P2 place: £{stake_place:.0f}",
         "------------------------------",
     ]
     if not mkt_ok:
@@ -1061,10 +1073,8 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                     lines.append("📍 ≤4 runners — place bets skipped (win only)")
                     horses_to_place = []
                 else:
-                    horses_to_place = [
-                        h for h in [a_name, b_name]
-                        if h and h != "?"
-                    ]            
+                    # Only place bet on P2 per staking rules
+                    horses_to_place = [b_name] if b_name and b_name != "?" else []         
                 for horse in horses_to_place:
                     sel_id = find_selection_id(horse, place_runners)
                     if sel_id is None:
