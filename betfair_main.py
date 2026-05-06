@@ -62,6 +62,7 @@ from betfair.api         import (
 )
 from betfair.strategy    import (
     qualifies, get_stake, get_place_stake, pick_stakes,
+    win_stake_for_pick, place_stake_for_pick,
     MIN_BACK_PRICE, MIN_LIQUIDITY, MIN_PICK1_PRICE, MIN_PICK2_PRICE,
     should_back_pick1, should_back_pick2, min_liquidity_for_price,
     next_tier_threshold, BET_TIERS, apply_liquidity,
