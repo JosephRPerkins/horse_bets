@@ -75,6 +75,8 @@ def get_stake(profit: float, tier: int) -> float:
     """
     Return per-horse win stake based on this tier's cumulative profit.
     Each tier has its own independent profit pot.
+    NOTE: win bets now use score+SP based staking via win_stake_for_pick().
+    This function is retained for briefing/display purposes.
     """
     thresholds = TIER_STAKE_THRESHOLDS.get(tier, [(0, 2.0)])
     stake = thresholds[0][1]
@@ -84,14 +86,55 @@ def get_stake(profit: float, tier: int) -> float:
     return stake
 
 
-def get_place_stake(profit: float, tier: int = TIER_STD) -> float:
+def win_stake_for_pick(sp: float, score: float) -> float:
     """
-    Place stake equals win stake for the tier.
-    Returns 0 if tier doesn't qualify for place bets.
+    Return win bet stake for a pick based on SP and SP-free score.
+
+    Rules (from staking grid analysis across 1,571 races):
+      - Only bet if score >= 3 AND SP >= 3.0
+      - Stake scales with SP:
+          3.0 - 6.0:  £2
+          6.0 - 10.0: £4
+          10.0+:      £6
+      - Below threshold: £0 (skip)
+
+    Betfair minimum enforced — all non-zero stakes are >= £2.
+    """
+    if not sp or not score:
+        return 0.0
+    if score < 3 or sp < 3.0:
+        return 0.0
+    if sp < 6.0:
+        return 2.0
+    if sp < 10.0:
+        return 4.0
+    return 6.0
+
+
+def place_stake_for_pick(score: float, tier: int) -> float:
+    """
+    Return place bet stake for a pick based on SP-free score.
+
+    Rules:
+      - Only place bet if score >= 2
+      - Flat £2 stake (Betfair minimum)
+      - Returns 0 if score below threshold or tier not in PLACE_BET_TIERS
     """
     if tier not in PLACE_BET_TIERS:
         return 0.0
-    return get_stake(profit, tier)
+    if not score or score < 2:
+        return 0.0
+    return 2.0
+
+
+def get_place_stake(profit: float, tier: int = TIER_STD) -> float:
+    """
+    Legacy function — retained for display/briefing purposes.
+    Actual place staking now uses place_stake_for_pick().
+    """
+    if tier not in PLACE_BET_TIERS:
+        return 0.0
+    return 2.0
 
 
 def next_tier_threshold(profit: float, tier: int) -> float:
