@@ -1,18 +1,17 @@
 """
 scratch_staking_grid.py
 =======================
-Tests a wide grid of staking rules against the raw results data.
+Tests staking rules against raw results data.
+Betfair minimum bet = £2. All non-zero stakes are £2 minimum.
 
-Dimensions tested:
-  1. Win bet SP thresholds (min price to place win bet)
-  2. Place bet SP thresholds (min price to place place bet)
-  3. Score thresholds (SP-free score minimum for P1)
-  4. Variable stakes by SP band
-  5. Variable stakes by tier
-  6. Combinations of the above
-
-All using System C picks (mw_p1=0.1, mw_p2=0.4) since mw makes no difference.
-P&L figures use post-race SP so are inflated — focus on win rates and relative rankings.
+Sections:
+  A. Win bet SP thresholds (P1 only)
+  B. Win both P1+P2 with independent SP thresholds
+  C. SP-free score + SP threshold combined
+  D. Variable stakes by SP band (£2 minimum)
+  E. Variable stakes by tier
+  F. Combined tier + SP + place bets
+  G. Your idea variants
 
 Run from ~/horse_bets_v3:
   python3 scratch_staking_grid.py 2>&1 | tee staking_grid_output.txt
@@ -20,17 +19,17 @@ Run from ~/horse_bets_v3:
 
 import json, os, sys
 from collections import defaultdict
-
 sys.path.insert(0, os.path.dirname(__file__))
-from predict import score_runner
+from predict import score_runner, place_terms
 from predict_v2 import (
     get_blended_picks, TIER_ELITE, TIER_STRONG, TIER_GOOD, TIER_STD,
-    TIER_LABELS, _sp_free_score
+    _sp_free_score,
 )
 
 COMMISSION = 0.05
 BET_TIERS  = {TIER_ELITE, TIER_STRONG, TIER_GOOD, TIER_STD}
 TIER_NAMES = {TIER_ELITE:"ELITE", TIER_STRONG:"STRONG", TIER_GOOD:"GOOD", TIER_STD:"STD"}
+MIN_STAKE  = 2.0   # Betfair exchange minimum
 
 def tof(v):
     try:
@@ -42,8 +41,17 @@ def get_pos(r):
     try: return int(str(r.get("position","")).strip())
     except: return None
 
-def win_pnl(sp, stake):
-    return round(stake * (sp - 1) * (1 - COMMISSION), 2)
+def stake(s):
+    """Enforce Betfair minimum — any non-zero stake becomes at least £2."""
+    return max(MIN_STAKE, float(s)) if s and s > 0 else 0.0
+
+def win_return(sp, s):
+    return round(s * (sp - 1) * (1 - COMMISSION), 2)
+
+def place_return(sp, s):
+    """Approximate place return using 1/4 odds model."""
+    place_sp = round((sp - 1) * 0.25 + 1, 2)
+    return round(s * (place_sp - 1) * (1 - COMMISSION), 2)
 
 def field_ok(runners, race):
     n = len(runners)
@@ -59,7 +67,7 @@ def field_ok(runners, race):
 def pct(a, b): return f"{a/b*100:.0f}%" if b else "—"
 def sgn(v):    return f"+£{v:.2f}" if v >= 0 else f"-£{abs(v):.2f}"
 
-# ── Load all raw results ──────────────────────────────────────────────────────
+# ── Load races ────────────────────────────────────────────────────────────────
 
 print("Loading races...")
 all_races = []
@@ -77,9 +85,8 @@ for fp in sorted(os.listdir("data/raw")):
         all_races.append(race)
 
 print(f"Loaded {len(all_races)} qualifying races with results")
-print()
 
-# ── Build enriched race records ───────────────────────────────────────────────
+# ── Build enriched records ────────────────────────────────────────────────────
 
 print("Building picks...")
 records = []
@@ -90,7 +97,6 @@ for race in all_races:
         "surface": race.get("surface","Turf") or "Turf",
         "type":    race.get("type","") or "",
     }
-
     tc, p1, p2, _ = get_blended_picks(runners, mw_p1=0.1, mw_p2=0.4, raw_race=raw_meta)
     if not p1 or tc not in BET_TIERS: continue
 
@@ -99,380 +105,294 @@ for race in all_races:
     p2pos = get_pos(p2) if p2 else None
     if p1pos is None: continue
 
-    # SP-free score for P1 and P2
-    p1score = _sp_free_score(p1)
-    p2score = _sp_free_score(p2) if p2 else 0
-
-    # Place terms
-    n = len(runners)
-    from predict import place_terms
+    n      = len(runners)
     places = place_terms(n)
 
     records.append({
-        "date":    race["_date"],
-        "tier":    tc,
-        "n":       n,
-        "places":  places,
-        "p1sp":    p1sp,   "p1won":    p1pos == 1,  "p1placed": p1pos <= places if p1pos else False,
-        "p2sp":    p2sp,   "p2won":    p2pos == 1 if p2pos else False,
-                           "p2placed": p2pos <= places if p2pos else False,
-        "p1score": p1score,
-        "p2score": p2score,
+        "date":     race["_date"],
+        "tier":     tc,
+        "n":        n,
+        "places":   places,
+        "p1sp":     p1sp,
+        "p1won":    p1pos == 1,
+        "p1placed": p1pos <= places if p1pos else False,
+        "p2sp":     p2sp,
+        "p2won":    p2pos == 1 if p2pos else False,
+        "p2placed": p2pos <= places if p2pos else False,
+        "p1score":  _sp_free_score(p1),
+        "p2score":  _sp_free_score(p2) if p2 else 0,
     })
 
-print(f"Records built: {len(records)}")
-print()
+print(f"Records: {len(records)} across {len(set(r['date'] for r in records))} days\n")
 
 # ── Simulator ─────────────────────────────────────────────────────────────────
 
-def simulate(records, win_stake_fn, place_stake_fn=None, label=""):
+def simulate(records, win_fn, place_fn=None, label=""):
     """
-    win_stake_fn(rec)   -> (p1_win_stake, p2_win_stake)
-    place_stake_fn(rec) -> (p1_place_stake, p2_place_stake) or None to skip
-    Returns: dict of stats
+    win_fn(rec)   -> (p1_win_stake, p2_win_stake)  — use 0 to skip
+    place_fn(rec) -> (p1_place_stake, p2_place_stake) or None
+    All non-zero stakes are enforced to Betfair minimum £2.
     """
-    n_races = len(records)
-    n_win_bets = n_place_bets = 0
-    win_pnl_total = place_pnl_total = 0.0
-    win_wins = place_wins = 0
-    total_staked = 0.0
+    nw = np_ = ww = pw = 0
+    wpnl = ppnl = staked = 0.0
 
     for rec in records:
-        ws1, ws2 = win_stake_fn(rec)
+        ws1_raw, ws2_raw = win_fn(rec)
+        ws1 = stake(ws1_raw); ws2 = stake(ws2_raw)
 
-        # P1 win bet
         if ws1 and rec["p1sp"]:
-            n_win_bets += 1; total_staked += ws1
-            if rec["p1won"]:
-                win_wins += 1
-                win_pnl_total += win_pnl(rec["p1sp"], ws1)
-            else:
-                win_pnl_total -= ws1
+            nw += 1; staked += ws1
+            if rec["p1won"]: ww += 1; wpnl += win_return(rec["p1sp"], ws1)
+            else: wpnl -= ws1
 
-        # P2 win bet
         if ws2 and rec["p2sp"]:
-            n_win_bets += 1; total_staked += ws2
-            if rec["p2won"]:
-                win_wins += 1
-                win_pnl_total += win_pnl(rec["p2sp"], ws2)
-            else:
-                win_pnl_total -= ws2
+            nw += 1; staked += ws2
+            if rec["p2won"]: ww += 1; wpnl += win_return(rec["p2sp"], ws2)
+            else: wpnl -= ws2
 
-        # Place bets
-        if place_stake_fn:
-            ps1, ps2 = place_stake_fn(rec)
+        if place_fn:
+            ps1_raw, ps2_raw = place_fn(rec)
+            ps1 = stake(ps1_raw); ps2 = stake(ps2_raw)
 
-            if ps1 and rec["p1sp"]:
-                n_place_bets += 1; total_staked += ps1
-                if rec["p1placed"]:
-                    place_wins += 1
-                    # Approximate place return: win_sp * 0.25 (1/4 odds)
-                    place_price = round((rec["p1sp"] - 1) * 0.25 + 1, 2)
-                    place_pnl_total += win_pnl(place_price, ps1)
-                else:
-                    place_pnl_total -= ps1
+            if ps1 and rec["p1sp"] and rec["n"] > 4:
+                np_ += 1; staked += ps1
+                if rec["p1placed"]: pw += 1; ppnl += place_return(rec["p1sp"], ps1)
+                else: ppnl -= ps1
 
-            if ps2 and rec["p2sp"]:
-                n_place_bets += 1; total_staked += ps2
-                if rec["p2placed"]:
-                    place_wins += 1
-                    place_price = round((rec["p2sp"] - 1) * 0.25 + 1, 2)
-                    place_pnl_total += win_pnl(place_price, ps2)
-                else:
-                    place_pnl_total -= ps2
+            if ps2 and rec["p2sp"] and rec["n"] > 4:
+                np_ += 1; staked += ps2
+                if rec["p2placed"]: pw += 1; ppnl += place_return(rec["p2sp"], ps2)
+                else: ppnl -= ps2
 
-    total_bets = n_win_bets + n_place_bets
-    total_pnl  = win_pnl_total + place_pnl_total
-
+    total_bets = nw + np_
+    total_pnl  = wpnl + ppnl
     return {
-        "label":         label,
-        "n_races":       n_races,
-        "n_win_bets":    n_win_bets,
-        "n_place_bets":  n_place_bets,
-        "total_bets":    total_bets,
-        "total_staked":  total_staked,
-        "win_wins":      win_wins,
-        "place_wins":    place_wins,
-        "win_pnl":       win_pnl_total,
-        "place_pnl":     place_pnl_total,
-        "total_pnl":     total_pnl,
-        "per_race":      total_pnl / n_races if n_races else 0,
-        "per_bet":       total_pnl / total_bets if total_bets else 0,
-        "win_rate":      win_wins / n_win_bets * 100 if n_win_bets else 0,
-        "roi":           total_pnl / total_staked * 100 if total_staked else 0,
+        "label":    label,
+        "bets":     total_bets,
+        "staked":   staked,
+        "wins":     ww + pw,
+        "win_rate": ww / nw * 100 if nw else 0,
+        "win_pnl":  wpnl,
+        "place_pnl": ppnl,
+        "total_pnl": total_pnl,
+        "per_bet":  total_pnl / total_bets if total_bets else 0,
+        "roi":      total_pnl / staked * 100 if staked else 0,
     }
 
-def print_results(results, sort_by="per_bet", top_n=None):
+def print_table(results, sort_by="per_bet", top_n=None):
     results = sorted(results, key=lambda x: -x[sort_by])
     if top_n: results = results[:top_n]
-    print(f"  {'Strategy':<50} {'Bets':>5} {'Win%':>6} {'P&L':>10} {'Per bet':>8} {'ROI':>7}")
-    print(f"  {'-'*88}")
+    print(f"  {'Strategy':<52} {'Bets':>5} {'Win%':>6} {'W P&L':>9} {'P P&L':>9} {'Per bet':>8} {'ROI':>7}")
+    print(f"  {'-'*98}")
     for r in results:
-        wr = f"{r['win_rate']:.0f}%" if r['n_win_bets'] else "—"
-        print(f"  {r['label']:<50} {r['total_bets']:>5} {wr:>6} "
-              f"{sgn(r['total_pnl']):>10} {sgn(r['per_bet']):>8} {r['roi']:>6.1f}%")
+        wr = f"{r['win_rate']:.0f}%"
+        print(f"  {r['label']:<52} {r['bets']:>5} {wr:>6} "
+              f"{sgn(r['win_pnl']):>9} {sgn(r['place_pnl']):>9} "
+              f"{sgn(r['per_bet']):>8} {r['roi']:>6.1f}%")
 
-# ── Section A: Win bet SP thresholds ─────────────────────────────────────────
+# ── A. Win bet SP thresholds ──────────────────────────────────────────────────
 
-print("=" * 70)
-print("A. WIN BET SP THRESHOLDS — P1 only, no place bets")
-print("=" * 70)
-print()
+print("=" * 75)
+print("A. WIN BET SP THRESHOLDS — P1 win bet only, no place bets")
+print("   All stakes £2 (Betfair minimum). Bets skipped below threshold.")
+print("=" * 75)
 
 results_a = []
-for min_sp in [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0]:
+for min_sp in [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0, 10.0]:
     r = simulate(records,
-        win_stake_fn=lambda rec, m=min_sp: (
-            2.0 if (rec["p1sp"] or 0) >= m else 0,
-            0
-        ),
-        label=f"P1 win only, SP >= {min_sp:.1f}"
-    )
+        win_fn=lambda rec, m=min_sp: (
+            2 if (rec["p1sp"] or 0) >= m else 0, 0),
+        label=f"P1 win £2, SP >= {min_sp:.1f}")
     results_a.append(r)
+print_table(results_a, sort_by="per_bet")
 
-print_results(results_a, sort_by="per_bet")
-
-# ── Section B: Win both P1+P2 with SP thresholds ─────────────────────────────
+# ── B. Win both P1+P2 — SP thresholds ────────────────────────────────────────
 
 print()
-print("=" * 70)
-print("B. WIN BOTH P1+P2 — minimum SP thresholds")
-print("=" * 70)
-print()
+print("=" * 75)
+print("B. WIN BOTH P1+P2 — independent SP thresholds, £2 each")
+print("=" * 75)
 
 results_b = []
-for min_p1 in [1.0, 2.0, 3.0, 4.0, 5.0]:
-    for min_p2 in [1.0, 2.0, 3.0, 4.0, 5.0]:
+for m1 in [1.0, 2.0, 3.0, 4.0, 5.0]:
+    for m2 in [1.0, 2.0, 3.0, 4.0, 5.0]:
         r = simulate(records,
-            win_stake_fn=lambda rec, m1=min_p1, m2=min_p2: (
-                2.0 if (rec["p1sp"] or 0) >= m1 else 0,
-                2.0 if (rec["p2sp"] or 0) >= m2 else 0,
-            ),
-            label=f"P1 SP>={min_p1:.0f} + P2 SP>={min_p2:.0f}"
-        )
+            win_fn=lambda rec, a=m1, b=m2: (
+                2 if (rec["p1sp"] or 0) >= a else 0,
+                2 if (rec["p2sp"] or 0) >= b else 0),
+            label=f"P1 SP>={m1:.0f} + P2 SP>={m2:.0f}")
         results_b.append(r)
+print_table(results_b, sort_by="per_bet", top_n=15)
 
-print_results(results_b, sort_by="per_bet", top_n=15)
-
-# ── Section C: Score thresholds ───────────────────────────────────────────────
+# ── C. Score + SP threshold ───────────────────────────────────────────────────
 
 print()
-print("=" * 70)
-print("C. SP-FREE SCORE THRESHOLDS — P1 win bet only")
-print("=" * 70)
-print()
+print("=" * 75)
+print("C. SP-FREE SCORE + SP THRESHOLD — P1 win bet £2 only")
+print("=" * 75)
 
 results_c = []
 for min_score in [0, 1, 2, 3, 4, 5]:
-    for min_sp in [1.0, 2.0, 3.0, 4.0, 5.0]:
+    for min_sp in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0]:
         r = simulate(records,
-            win_stake_fn=lambda rec, ms=min_score, msp=min_sp: (
-                2.0 if (rec["p1score"] >= ms and (rec["p1sp"] or 0) >= msp) else 0,
-                0
-            ),
-            label=f"P1 score>={min_score} AND SP>={min_sp:.0f}"
-        )
+            win_fn=lambda rec, ms=min_score, msp=min_sp: (
+                2 if (rec["p1score"] >= ms and (rec["p1sp"] or 0) >= msp) else 0, 0),
+            label=f"score>={min_score} AND SP>={min_sp:.0f}")
         results_c.append(r)
+print_table(results_c, sort_by="per_bet", top_n=20)
 
-print_results(results_c, sort_by="per_bet", top_n=15)
-
-# ── Section D: Variable stakes by SP band ────────────────────────────────────
+# ── D. Variable stakes by SP band ────────────────────────────────────────────
 
 print()
-print("=" * 70)
-print("D. VARIABLE STAKES BY SP BAND")
-print("   (£1 odds-on, £2 evens-3/1, £3 3/1-6/1, £4 6/1+)")
-print("=" * 70)
-print()
+print("=" * 75)
+print("D. VARIABLE STAKES BY SP BAND (£2 minimum on all non-zero stakes)")
+print("=" * 75)
 
-def sp_band_stake(sp, bands):
-    """bands = [(max_sp, stake), ...] sorted by max_sp ascending, last is default"""
+def band_stake(sp, bands):
+    """bands = [(max_sp, raw_stake), ...]. Returns enforced stake."""
     if not sp: return 0
-    for max_sp, stake in bands:
-        if sp < max_sp: return stake
-    return bands[-1][1]
+    for max_sp, s in bands:
+        if sp < max_sp: return stake(s)
+    return stake(bands[-1][1])
 
 band_configs = [
-    ("Skip <2, £2 2-5, £3 5-10, £4 10+",
-        [(2.0,0),(5.0,2),(10.0,3),(999,4)]),
-    ("£1 <2, £2 2-4, £3 4-8, £4 8+",
-        [(2.0,1),(4.0,2),(8.0,3),(999,4)]),
-    ("£2 <3, £3 3-6, £4 6-10, £5 10+",
-        [(3.0,2),(6.0,3),(10.0,4),(999,5)]),
-    ("Skip <3, £2 3-6, £3 6-10, £4 10+",
+    ("Skip <3/1 | £2 at 3-6/1 | £3 at 6-10/1 | £4 at 10/1+",
         [(3.0,0),(6.0,2),(10.0,3),(999,4)]),
-    ("Skip <2, £2 2-4, £2 4+",
-        [(2.0,0),(4.0,2),(999,2)]),
-    ("Flat £2 all",
+    ("Skip <3/1 | £2 at 3-6/1 | £4 at 6-10/1 | £6 at 10/1+",
+        [(3.0,0),(6.0,2),(10.0,4),(999,6)]),
+    ("Skip <2/1 | £2 at 2-5/1 | £3 at 5-10/1 | £4 at 10/1+",
+        [(2.0,0),(5.0,2),(10.0,3),(999,4)]),
+    ("Skip <2/1 | £2 at 2-4/1 | £3 at 4-8/1 | £4 at 8/1+",
+        [(2.0,0),(4.0,2),(8.0,3),(999,4)]),
+    ("£2 <3/1 | £3 at 3-6/1 | £4 at 6-10/1 | £6 at 10/1+",
+        [(3.0,2),(6.0,3),(10.0,4),(999,6)]),
+    ("Flat £2 all (baseline)",
         [(999,2)]),
 ]
 
 results_d = []
 for name, bands in band_configs:
-    # P1 and P2 both with band stakes
     r = simulate(records,
-        win_stake_fn=lambda rec, b=bands: (
-            sp_band_stake(rec["p1sp"], b),
-            sp_band_stake(rec["p2sp"], b),
-        ),
-        label=name
-    )
+        win_fn=lambda rec, b=bands: (
+            band_stake(rec["p1sp"], b),
+            band_stake(rec["p2sp"], b)),
+        label=name)
     results_d.append(r)
+print_table(results_d, sort_by="per_bet")
 
-print_results(results_d, sort_by="per_bet")
-
-# ── Section E: Variable stakes by tier ───────────────────────────────────────
+# ── E. Variable stakes by tier ────────────────────────────────────────────────
 
 print()
-print("=" * 70)
-print("E. VARIABLE STAKES BY TIER")
-print("=" * 70)
-print()
+print("=" * 75)
+print("E. VARIABLE STAKES BY TIER (non-zero enforced to £2 minimum)")
+print("=" * 75)
 
 tier_configs = [
-    ("ELITE £3, STRONG £2, GOOD £1, STD £1",
-        {TIER_ELITE:3, TIER_STRONG:2, TIER_GOOD:1, TIER_STD:1}),
-    ("ELITE £4, STRONG £3, GOOD £2, STD £1",
-        {TIER_ELITE:4, TIER_STRONG:3, TIER_GOOD:2, TIER_STD:1}),
-    ("ELITE £2, STRONG £2, GOOD £2, STD £2",
+    ("ELITE £4 | STRONG £3 | GOOD £2 | STD £2",
+        {TIER_ELITE:4, TIER_STRONG:3, TIER_GOOD:2, TIER_STD:2}),
+    ("ELITE £3 | STRONG £2 | GOOD £2 | STD £2",
+        {TIER_ELITE:3, TIER_STRONG:2, TIER_GOOD:2, TIER_STD:2}),
+    ("Flat £2 all tiers",
         {TIER_ELITE:2, TIER_STRONG:2, TIER_GOOD:2, TIER_STD:2}),
-    ("ELITE £3, STRONG £2, GOOD £2, STD skip",
-        {TIER_ELITE:3, TIER_STRONG:2, TIER_GOOD:2, TIER_STD:0}),
-    ("ELITE £2 only, others skip",
-        {TIER_ELITE:2, TIER_STRONG:0, TIER_GOOD:0, TIER_STD:0}),
-    ("ELITE+STRONG £2, GOOD+STD skip",
+    ("ELITE £2 | STRONG £2 | GOOD £2 | STD skip",
+        {TIER_ELITE:2, TIER_STRONG:2, TIER_GOOD:2, TIER_STD:0}),
+    ("ELITE £2 | STRONG £2 | GOOD skip | STD skip",
         {TIER_ELITE:2, TIER_STRONG:2, TIER_GOOD:0, TIER_STD:0}),
+    ("ELITE £2 only | all others skip",
+        {TIER_ELITE:2, TIER_STRONG:0, TIER_GOOD:0, TIER_STD:0}),
 ]
 
 results_e = []
-for name, tier_stakes in tier_configs:
+for name, ts in tier_configs:
     r = simulate(records,
-        win_stake_fn=lambda rec, ts=tier_stakes: (
-            ts.get(rec["tier"], 0),
-            ts.get(rec["tier"], 0),
-        ),
-        label=name
-    )
+        win_fn=lambda rec, t=ts: (t.get(rec["tier"],0), t.get(rec["tier"],0)),
+        label=name)
     results_e.append(r)
+print_table(results_e, sort_by="per_bet")
 
-print_results(results_e, sort_by="per_bet")
-
-# ── Section F: Combined — tier + SP threshold ─────────────────────────────────
+# ── F. Combined rules ─────────────────────────────────────────────────────────
 
 print()
-print("=" * 70)
-print("F. COMBINED — Tier filter + SP threshold + place bets")
-print("   Place bets use approximate 1/4 odds model")
-print("=" * 70)
-print()
+print("=" * 75)
+print("F. COMBINED — tier + SP + score + place bets (£2 minimum)")
+print("=" * 75)
 
-combos = [
-    # (label, p1_win_cond, p2_win_cond, p1_place_cond, p2_place_cond, win_stake, place_stake)
-    ("Current: win+place both always",
-        lambda r: True, lambda r: True,
-        lambda r: True, lambda r: True, 2, 2),
-    ("Win P1 if SP>=3, place P2 always",
-        lambda r: (r["p1sp"] or 0)>=3, lambda r: False,
-        lambda r: False, lambda r: True, 2, 2),
-    ("Win P1 if SP>=3, place both always",
-        lambda r: (r["p1sp"] or 0)>=3, lambda r: False,
-        lambda r: True, lambda r: True, 2, 2),
-    ("Win P1+P2 if SP>=3, place both",
-        lambda r: (r["p1sp"] or 0)>=3, lambda r: (r["p2sp"] or 0)>=3,
-        lambda r: True, lambda r: True, 2, 2),
-    ("Win P1 if SP>=5, place P2 always",
-        lambda r: (r["p1sp"] or 0)>=5, lambda r: False,
-        lambda r: False, lambda r: True, 2, 2),
-    ("Win both if SP>=3, no place",
-        lambda r: (r["p1sp"] or 0)>=3, lambda r: (r["p2sp"] or 0)>=3,
-        lambda r: False, lambda r: False, 2, 0),
-    ("ELITE+STRONG win both, GOOD+STD place only",
-        lambda r: r["tier"] in (TIER_ELITE,TIER_STRONG),
-        lambda r: r["tier"] in (TIER_ELITE,TIER_STRONG),
-        lambda r: True, lambda r: True, 2, 2),
-    ("Win P1 if score>=3 and SP>=2, place P2 always",
-        lambda r: r["p1score"]>=3 and (r["p1sp"] or 0)>=2, lambda r: False,
-        lambda r: False, lambda r: True, 2, 2),
-    ("Win P1 if score>=3 and SP>=3, place both",
-        lambda r: r["p1score"]>=3 and (r["p1sp"] or 0)>=3, lambda r: False,
-        lambda r: True, lambda r: True, 2, 2),
-    ("ELITE win both £3, STRONG win P1 £2 + place P2 £2, GOOD place only £2",
-        lambda r: r["tier"] in (TIER_ELITE,TIER_STRONG),
-        lambda r: r["tier"] == TIER_ELITE,
-        lambda r: r["tier"] in (TIER_GOOD,TIER_STD),
-        lambda r: r["tier"] in (TIER_STRONG,TIER_GOOD,TIER_STD),
-        3, 2),
+def make(wf, pf=None, lbl=""):
+    return simulate(records, win_fn=wf, place_fn=pf, label=lbl)
+
+results_f = [
+    make(lambda r: (2,2), None,
+         "Baseline: win P1+P2 flat £2, no place"),
+    make(lambda r: (2,2), lambda r: (2,2),
+         "Win P1+P2 + place P1+P2 flat £2"),
+    make(lambda r: (2 if (r["p1sp"] or 0)>=3 else 0, 0), lambda r: (0,2),
+         "Win P1 if SP>=3 + place P2 always"),
+    make(lambda r: (2 if (r["p1sp"] or 0)>=3 else 0, 0), lambda r: (0, 2 if (r["p2sp"] or 0)>=2 else 0),
+         "Win P1 if SP>=3 + place P2 if SP>=2"),
+    make(lambda r: (2 if (r["p1sp"] or 0)>=5 else 0, 0), lambda r: (0,2),
+         "Win P1 if SP>=5 + place P2 always"),
+    make(lambda r: (2 if r["p1score"]>=3 and (r["p1sp"] or 0)>=3 else 0, 0), lambda r: (0,2),
+         "Win P1 if score>=3 AND SP>=3 + place P2"),
+    make(lambda r: (2 if r["p1score"]>=3 and (r["p1sp"] or 0)>=3 else 0, 0),
+         lambda r: (0, 2 if r["p2score"]>=2 else 0),
+         "Win P1 score>=3+SP>=3 + place P2 score>=2"),
+    make(lambda r: (2 if r["p1score"]>=3 and (r["p1sp"] or 0)>=4 else 0, 0),
+         lambda r: (0, 2 if r["p2score"]>=2 else 0),
+         "Win P1 score>=3+SP>=4 + place P2 score>=2"),
+    make(lambda r: (2 if r["p1score"]>=3 and (r["p1sp"] or 0)>=5 else 0, 0),
+         lambda r: (0, 2 if r["p2score"]>=2 else 0),
+         "Win P1 score>=3+SP>=5 + place P2 score>=2"),
+    make(lambda r: (
+            band_stake(r["p1sp"],[(3.0,0),(6.0,2),(10.0,3),(999,4)]) if r["p1score"]>=3 else 0, 0),
+         lambda r: (0, 2 if r["p2score"]>=2 else 0),
+         "Win P1 score>=3 var stake + place P2 score>=2"),
+    make(lambda r: (2 if r["tier"] in (TIER_ELITE,TIER_STRONG) else 0,
+                    2 if r["tier"] == TIER_ELITE else 0),
+         lambda r: (0, 2 if r["tier"] in (TIER_GOOD,TIER_STD) else 0),
+         "ELITE win both | STRONG win P1 | GOOD/STD place P2"),
+    make(lambda r: (2 if r["tier"] in (TIER_ELITE,TIER_STRONG) and (r["p1sp"] or 0)>=3 else 0, 0),
+         lambda r: (0, 2),
+         "Win P1 if ELITE/STRONG AND SP>=3 + place P2 always"),
 ]
+print_table(results_f, sort_by="per_bet")
 
-results_f = []
-for item in combos:
-    label = item[0]
-    p1w_cond, p2w_cond, p1p_cond, p2p_cond, ws, ps = item[1:]
+# ── G. Your idea variants ─────────────────────────────────────────────────────
 
-    def make_win_fn(c1, c2, s):
-        return lambda rec: (s if c1(rec) else 0, s if c2(rec) else 0)
-    def make_place_fn(c1, c2, s):
-        if s == 0: return None
-        return lambda rec: (s if c1(rec) else 0, s if c2(rec) else 0)
-
-    r = simulate(records,
-        win_stake_fn=make_win_fn(p1w_cond, p2w_cond, ws),
-        place_stake_fn=make_place_fn(p1p_cond, p2p_cond, ps),
-        label=label
-    )
-    results_f.append(r)
-
-print_results(results_f, sort_by="per_bet")
-
-# ── Section G: Your specific idea ────────────────────────────────────────────
 print()
-print("=" * 70)
-print("G. YOUR IDEA — 'short fav win only, longer shot place only'")
-print("   Variants around that theme")
-print("=" * 70)
-print()
+print("=" * 75)
+print("G. YOUR IDEA — short favs different treatment to longer shots")
+print("=" * 75)
 
-your_ideas = [
-    ("If P1 short (<2): win only. If P1 long (>=2): win+place",
-        lambda r: (2, 2),
-        lambda r: (0, 2) if (r["p1sp"] or 0) < 2 else (2, 2)),
-    ("P1<3: win bet only. P1>=3: win+place",
-        lambda r: (2, 2),
-        lambda r: (0, 0) if (r["p1sp"] or 0) < 3 else (2, 2)),
-    ("P1<2: skip. P1 2-4: place only. P1>=4: win+place",
-        lambda r: (0 if (r["p1sp"] or 0) < 2 else 0,
-                   2 if (r["p1sp"] or 0) >= 4 else 0),
-        lambda r: (2 if 2 <= (r["p1sp"] or 0) < 4 else
-                   (2 if (r["p1sp"] or 0) >= 4 else 0), 2)),
-    ("Win P1 only if >=3. Place P2 only if >=3",
-        lambda r: (2 if (r["p1sp"] or 0) >= 3 else 0, 0),
-        lambda r: (0, 2 if (r["p2sp"] or 0) >= 3 else 0)),
-    ("Win P1 if >=3 + place P2 always (your original idea)",
-        lambda r: (2 if (r["p1sp"] or 0) >= 3 else 0, 0),
-        lambda r: (0, 2)),
-    ("Win P1 if score>=3. Place P2 if score>=2",
-        lambda r: (2 if r["p1score"] >= 3 else 0, 0),
-        lambda r: (0, 2 if r["p2score"] >= 2 else 0)),
-    ("ELITE: win+place both. STRONG: win P1 + place P2. GOOD/STD: place P2 only",
-        lambda r: (2 if r["tier"]==TIER_ELITE else
-                   (2 if r["tier"]==TIER_STRONG else 0),
-                   2 if r["tier"]==TIER_ELITE else 0),
-        lambda r: (2 if r["tier"]==TIER_ELITE else 0,
-                   2 if r["tier"] in (TIER_ELITE,TIER_STRONG,TIER_GOOD,TIER_STD) else 0)),
-    ("Win P1+P2 if ELITE, Win P1 if STRONG, place P2 if GOOD/STD",
-        lambda r: (2, 2 if r["tier"]==TIER_ELITE else 0),
-        lambda r: (0, 2 if r["tier"] in (TIER_GOOD,TIER_STD) else 0)),
+results_g = [
+    make(lambda r: (2,2), lambda r: (2,2),
+         "Current: win+place both always (£2 each)"),
+    make(lambda r: (2 if (r["p1sp"] or 0)>=3 else 0, 0), lambda r: (0,2),
+         "Win P1 if SP>=3, place P2 always"),
+    make(lambda r: (2 if r["p1score"]>=3 else 0, 0), lambda r: (0, 2 if r["p2score"]>=2 else 0),
+         "Win P1 if score>=3, place P2 if score>=2"),
+    make(lambda r: (0, 0),
+         lambda r: (2 if (r["p1sp"] or 0)<3 else 0, 2 if (r["p1sp"] or 0)>=3 else 0),
+         "P1<3: place only | P1>=3: win only"),
+    make(lambda r: (2 if (r["p1sp"] or 0)>=3 else 0, 2 if (r["p2sp"] or 0)>=3 else 0),
+         lambda r: (2 if (r["p1sp"] or 0)<3 else 0, 2 if (r["p2sp"] or 0)<3 else 0),
+         "SP>=3: win bet | SP<3: place bet (both picks)"),
+    make(lambda r: (2 if r["tier"]==TIER_ELITE and (r["p1sp"] or 0)>=2 else
+                    2 if r["tier"]==TIER_STRONG and (r["p1sp"] or 0)>=3 else
+                    2 if r["tier"] in (TIER_GOOD,TIER_STD) and (r["p1sp"] or 0)>=4 else 0, 0),
+         lambda r: (0, 2),
+         "Tier-scaled SP floor for win + place P2 always"),
+    make(lambda r: (
+            band_stake(r["p1sp"],[(3.0,0),(6.0,2),(10.0,3),(999,4)]), 0),
+         lambda r: (0, 2),
+         "Skip P1<3 | var win stake | place P2 always £2"),
+    make(lambda r: (
+            band_stake(r["p1sp"],[(3.0,0),(6.0,2),(10.0,3),(999,4)]) if r["p1score"]>=3 else 0, 0),
+         lambda r: (0, 2 if r["p2score"]>=2 else 0),
+         "P1 score>=3 var win stake | P2 score>=2 place"),
 ]
-
-results_g = []
-for item in your_ideas:
-    label, win_fn, place_fn = item
-    r = simulate(records, win_stake_fn=win_fn, place_stake_fn=place_fn, label=label)
-    results_g.append(r)
-
-print_results(results_g, sort_by="per_bet")
+print_table(results_g, sort_by="per_bet")
 
 print()
-print("NOTE: P&L figures use post-race SP (inflated by backtest contamination).")
-print("Focus on win rates, per-bet rankings, and ROI relativities — not absolute P&L.")
+print("NOTE: P&L figures inflated by backtest SP contamination.")
+print("Focus on win rates, per-bet rankings, and ROI relativities.")
 print("Done.")
