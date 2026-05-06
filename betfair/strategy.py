@@ -65,7 +65,7 @@ TIER_STAKE_THRESHOLDS = {
 BET_TIERS = {TIER_ELITE, TIER_STRONG, TIER_GOOD, TIER_STD}
 
 # Place bet tiers — only ELITE and STRONG get place bets
-PLACE_BET_TIERS = {TIER_ELITE, TIER_STRONG}
+PLACE_BET_TIERS = {TIER_ELITE, TIER_STRONG, TIER_GOOD, TIER_STD}
 
 # Minimum runners for place bets (Betfair pays 3 places at 8+)
 MIN_RUNNERS_FOR_PLACE = 8
