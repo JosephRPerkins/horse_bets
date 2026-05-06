@@ -65,7 +65,7 @@ from betfair.strategy    import (
     win_stake_for_pick, place_stake_for_pick,
     MIN_BACK_PRICE, MIN_LIQUIDITY, MIN_PICK1_PRICE, MIN_PICK2_PRICE,
     should_back_pick1, should_back_pick2, min_liquidity_for_price,
-    next_tier_threshold, BET_TIERS, apply_liquidity,
+    next_tier_threshold, BET_TIERS, apply_liquidity, p2_win_stake_for_pick,
 )
 from predict_v2 import TIER_ELITE, TIER_STRONG, TIER_GOOD, TIER_STD, TIER_SKIP, TIER_LABELS
 from betfair.state       import (
@@ -605,7 +605,7 @@ def _live_bet_job(race: dict, state: dict):
     b_score = _sp_free_score(top2) if top2 else 0
 
     stake_a     = win_stake_for_pick(a_live, a_score)
-    stake_b     = 0   # no P2 win bet per staking rules
+    stake_b     = p2_win_stake_for_pick(b_live, b_score)
     stake_place = place_stake_for_pick(b_score, tier)
 
     n_runners_live = len(race.get("all_runners") or [])
@@ -995,7 +995,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
         f"📝 <b>PAPER BET - {race_label}</b>",
         f"{tier_label}",
         f"Balance: £{balance:.2f} | Profit: £{profit:.2f} | "
-        f"P1 win: £{stake_a:.0f} (score={a_score:.0f}) | P2 place: £{stake_place:.0f}",
+        f"P1 win: £{stake_a:.0f} (score={a_score:.0f}) | P2 win: £{stake_b:.0f} | P2 place: £{stake_place:.0f}",
         "------------------------------",
     ]
     if not mkt_ok:
