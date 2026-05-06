@@ -1370,11 +1370,12 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             r_tier  = r.get("tier", 0)
             r_profit = get_tier_profit(state, r_tier)
             n_r     = len(r.get("all_runners") or [])
-            if a_price and b_price:
-                s_a, s_b, _ = pick_stakes(r_profit, r_tier, a_price, b_price, n_runners=n_r)
-            else:
-                s_a = get_stake(r_profit, r_tier)
-                s_b = s_a
+            from predict_v2 import _sp_free_score
+            a_score = _sp_free_score(top1) if top1 else 0
+            b_score = _sp_free_score(top2) if top2 else 0
+            s_a = win_stake_for_pick(a_price, a_score) if a_price else 0
+            s_b = 0  # no P2 win bet
+            s_place = place_stake_for_pick(b_score, r_tier)
             off_dt  = _parse_off_dt(r)
             bet_at  = (off_dt - timedelta(minutes=BET_BEFORE_MINUTES) + timedelta(hours=1)).strftime("%H:%M") if off_dt else "?"
             p1_note    = " (odds-on→skip)" if (a_price and a_price < MIN_PICK1_PRICE) else ""
@@ -1383,8 +1384,8 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             lines.append(
                 f"{badge} <b>{r.get('off','?')} {r.get('course','?')}</b>"
                 f" [bet@{bet_at}]{place_note}\n"
-                f"  ⭐ {top1.get('horse','?')} ({top1.get('sp','?')}){p1_note} £{s_a:.2f} | "
-                f"🔵 {top2.get('horse','?')} ({top2.get('sp','?')}){p2_note} £{s_b:.2f}"
+                f"  ⭐ {top1.get('horse','?')} ({top1.get('sp','?')}){p1_note} win=£{s_a:.0f} | "
+                f"🔵 {top2.get('horse','?')} ({top2.get('sp','?')}) place=£{s_place:.0f}"
             )
         if not qualifying:
             lines.append("No qualifying races today.")
