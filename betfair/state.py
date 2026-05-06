@@ -173,7 +173,9 @@ def reset_daily(state: dict) -> dict:
             state["day_start_pot"]     = carry
             logger.info(f"Daily banking (paper): banked £{banked:.0f}, carrying £{carry:.2f}")
         else:
-            state["day_start_pot"] = 0.0
+            # Negative or zero — preserve as-is, nothing to bank
+            state["day_start_pot"] = profit
+            logger.info(f"Daily reset (paper): carrying £{profit:.2f} (no banking)")
 
     # Reset streak daily counters — stake resets to current tier
     if state.get("streak_active", False):
