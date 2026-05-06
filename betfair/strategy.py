@@ -102,7 +102,7 @@ def win_stake_for_pick(sp: float, score: float) -> float:
     """
     if not sp or not score:
         return 0.0
-    if score < 3 or sp < 3.0:
+    if score < 3 or sp < 2.0:
         return 0.0
     if sp < 6.0:
         return 2.0
@@ -123,6 +123,18 @@ def place_stake_for_pick(score: float, tier: int) -> float:
     if tier not in PLACE_BET_TIERS:
         return 0.0
     if not score or score < 2:
+        return 0.0
+    return 2.0
+
+def p2_win_stake_for_pick(sp: float, score: float) -> float:
+    """
+    P2 win bet stake. Only bet when score>=4 AND SP>=3.0.
+    Analysis across 218 bets shows 33% win rate vs 31% breakeven at worst band.
+    Flat £2 stake (Betfair minimum).
+    """
+    if not sp or not score:
+        return 0.0
+    if score < 4 or sp < 3.0:
         return 0.0
     return 2.0
 
