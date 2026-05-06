@@ -1036,8 +1036,12 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
         lines.append("🐴 <b>Two-horse race — place bets only</b>")
 
     if not paper_bets and not place_only:
+        if stake_place == 0:
+            # No win bet and no place bet — skip this race entirely
+            logger.info(f"No bets for {race_label} (score/SP below threshold) — skipping")
+            return
         if not silent:
-            lines.append("\nℹ️ No win bets — checking place market only")
+            lines.append("\nℹ️ No win bets — place bet only")
         # Don't return — fall through to place bet section
 
     # ── Place market bets ─────────────────────────────────────────────────────
@@ -1047,7 +1051,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     place_bets  = []
     cons_places = _race_cons_places(race)
 
-    if not silent:
+    if not silent and p_stake > 0:
         try:
             place_mkt, _ = find_place_market(race)
             place_odds_map = {}
