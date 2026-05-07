@@ -28,6 +28,9 @@ import logging
 import os
 from datetime import date
 
+import threading
+_state_lock = threading.Lock()
+
 logger = logging.getLogger("betfair.state")
 
 STATE_PATH = os.path.join(
@@ -292,13 +295,13 @@ def tier_profit_summary(state: dict) -> str:
 def update_cumulative_profit(state: dict, pnl: float) -> list:
     """
     Add pnl to cumulative_profit and check for milestone notifications.
-    Returns list of Telegram notification strings (empty if no milestone).
-    Called after each race settles — tracks combined daily/overall P&L
-    separately from per-tier pots.
+    Thread-safe — uses _state_lock to prevent race conditions between
+    concurrent settlement threads overwriting each other's updates.
     """
-    prev    = state.get("cumulative_profit", 0.0)
-    updated = round(prev + pnl, 2)
-    state["cumulative_profit"] = updated
+    with _state_lock:
+        prev    = state.get("cumulative_profit", 0.0)
+        updated = round(prev + pnl, 2)
+        state["cumulative_profit"] = updated
     save(state)
 
     alerts    = []
