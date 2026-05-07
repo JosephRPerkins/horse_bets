@@ -70,7 +70,7 @@ from betfair.strategy    import (
 from predict_v2 import TIER_ELITE, TIER_STRONG, TIER_GOOD, TIER_STD, TIER_SKIP, TIER_LABELS
 from betfair.state       import (
     load, save, reset_daily, update_cumulative_profit,
-    get_tier_profit, tier_profit_summary,
+    get_tier_profit, tier_profit_summary, _state_lock,
 )
 from betfair.balance_log import log_bet_placed, start_balance_logger
 from betfair.settlement  import settle_race
@@ -439,7 +439,10 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
 
     # ── Update state ──────────────────────────────────────────────────────────
     if not silent:
-        milestone_alerts = update_cumulative_profit(state, combined_pnl)
+        with _state_lock:
+            milestone_alerts = update_cumulative_profit.__wrapped__(state, combined_pnl) \
+                if hasattr(update_cumulative_profit, '__wrapped__') \
+                else update_cumulative_profit(state, combined_pnl)
         for alert in milestone_alerts:
             send(alert)
         # Update per-tier profit pot
