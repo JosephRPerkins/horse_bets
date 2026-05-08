@@ -298,10 +298,9 @@ def update_cumulative_profit(state: dict, pnl: float) -> list:
     Thread-safe — uses _state_lock to prevent race conditions between
     concurrent settlement threads overwriting each other's updates.
     """
-    with _state_lock:
-        prev    = state.get("cumulative_profit", 0.0)
-        updated = round(prev + pnl, 2)
-        state["cumulative_profit"] = updated
+    prev    = state.get("cumulative_profit", 0.0)
+    updated = round(prev + pnl, 2)
+    state["cumulative_profit"] = updated
     save(state)
 
     alerts    = []
