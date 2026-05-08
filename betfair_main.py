@@ -440,9 +440,7 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     # ── Update state ──────────────────────────────────────────────────────────
     if not silent:
         with _state_lock:
-            milestone_alerts = update_cumulative_profit.__wrapped__(state, combined_pnl) \
-                if hasattr(update_cumulative_profit, '__wrapped__') \
-                else update_cumulative_profit(state, combined_pnl)
+            milestone_alerts = update_cumulative_profit(state, combined_pnl)
         for alert in milestone_alerts:
             send(alert)
         # Update per-tier profit pot
