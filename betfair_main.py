@@ -607,7 +607,7 @@ def _live_bet_job(race: dict, state: dict):
 
     stake_a     = win_stake_for_pick(a_live, a_score)
     stake_b     = p2_win_stake_for_pick(b_live, b_score)
-    stake_place = place_stake_for_pick(b_score, tier)
+    stake_place = place_stake_for_pick(b_score, tier, sp=b_live or 0.0)
 
     n_runners_live = len(race.get("all_runners") or [])
     place_only = False
