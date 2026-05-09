@@ -1137,7 +1137,7 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
         target = _paper_settle,
         args   = (payload["race"], payload["paper_bets"], state),
         kwargs = {"place_bets": payload.get("place_bets"),
-                  "silent": True},
+                  "silent": silent},
         daemon = True,
         name   = f"PaperSettle_{race.get('race_id', '')}",
     )
