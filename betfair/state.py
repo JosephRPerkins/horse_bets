@@ -163,22 +163,10 @@ def reset_daily(state: dict) -> dict:
             state["day_start_pot"] = state.get("cumulative_profit", 0.0)
 
     else:
-        # ── Paper mode: bank from cumulative_profit as before ─────────────────
+        # ── Paper mode: preserve cumulative as-is, no banking ─────────────────
         profit = state.get("cumulative_profit", 0.0)
-        if profit > 0:
-            banked = (profit // 50) * 50
-            carry  = round(profit - banked, 2)
-            if carry < 10 and banked >= 50:
-                banked -= 50
-                carry   = round(profit - banked, 2)
-            state["banked_profit"]     = round(state.get("banked_profit", 0.0) + banked, 2)
-            state["cumulative_profit"] = carry
-            state["day_start_pot"]     = carry
-            logger.info(f"Daily banking (paper): banked £{banked:.0f}, carrying £{carry:.2f}")
-        else:
-            # Negative or zero — preserve as-is, nothing to bank
-            state["day_start_pot"] = profit
-            logger.info(f"Daily reset (paper): carrying £{profit:.2f} (no banking)")
+        state["day_start_pot"] = profit
+        logger.info(f"Daily reset (paper): cumulative preserved at £{profit:.2f}")
 
     # Reset streak daily counters — stake resets to current tier
     if state.get("streak_active", False):
