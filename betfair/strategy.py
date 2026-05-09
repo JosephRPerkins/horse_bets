@@ -111,20 +111,22 @@ def win_stake_for_pick(sp: float, score: float) -> float:
     return 6.0
 
 
-def place_stake_for_pick(score: float, tier: int) -> float:
+def place_stake_for_pick(score: float, tier: int, sp: float = 0.0) -> float:
     """
-    Return place bet stake for a pick based on SP-free score.
-
-    Rules:
-      - Only place bet if score >= 2
-      - Flat £2 stake (Betfair minimum)
-      - Returns 0 if score below threshold or tier not in PLACE_BET_TIERS
+    Place bet on P2 only when:
+    - score >= 4 (strong stats — places 76% of the time)
+    - OR score >= 3 AND SP >= 5 (longer odds with genuine value)
+    Short-priced P2s below 3/1 lose money regardless of score.
     """
     if tier not in PLACE_BET_TIERS:
         return 0.0
-    if not score or score < 2:
+    if not score:
         return 0.0
-    return 2.0
+    if score >= 4:
+        return 2.0
+    if score >= 3 and sp >= 5.0:
+        return 2.0
+    return 0.0
 
 def p2_win_stake_for_pick(sp: float, score: float) -> float:
     """
