@@ -29,7 +29,7 @@ import os
 from datetime import date
 
 import threading
-_state_lock = threading.Lock()
+_state_lock = threading.RLock()
 
 logger = logging.getLogger("betfair.state")
 
