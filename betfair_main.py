@@ -1139,8 +1139,8 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
   
     t = threading.Thread(
         target = _paper_settle,
-        args   = (payload["race"], payload["paper_bets"], state),
-        kwargs = {"place_bets": payload.get("place_bets"),
+        args   = (race, paper_bets, state),
+        kwargs = {"place_bets": place_bets if place_bets else None,
                   "silent": silent},
         daemon = True,
         name   = f"PaperSettle_{race.get('race_id', '')}",
