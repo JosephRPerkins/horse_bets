@@ -482,6 +482,9 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
     profit_sign    = "+" if cum_profit >= 0 else ""
     comb_sign      = "+" if combined_pnl >= 0 else ""
 
+    true_total     = state.get("total_pnl", 0.0)
+    true_sign      = "+" if true_total >= 0 else ""
+
     lines += ["------------------------------"]
     lines.append(f"Win P&L:         {sign}£{total_pnl:.2f}")
     if place_bets:
@@ -492,6 +495,7 @@ def _paper_settle(race: dict, paper_bets: list, state: dict,
         lines.append(f"Day Place P&L:   {day_place_sign}£{day_place_pnl:.2f}")
     lines += [
         f"Cumulative P&L:  {profit_sign}£{cum_profit:.2f}",
+        f"True total P&L:  {true_sign}£{true_total:.2f}",
         f"Next tier at:    £{_next_tier_threshold(cum_profit):.0f} profit",
     ]
 
@@ -1227,6 +1231,7 @@ def end_of_day_job(state: dict):
         "==============================",
         f"Balance:          £{bal:.2f}",
         f"Cumulative P&L:   {profit_sign}£{profit:.2f}  (win + place)",
+        f"True total P&L:   {'+' if state.get('total_pnl',0)>=0 else ''}£{state.get('total_pnl',0):.2f}  (never reset)",
         f"Banked profit:    £{state.get('banked_profit', 0.0):.2f}",
         f"Tier pots:\n{tier_profit_summary(state)}",
     ]
@@ -1352,6 +1357,7 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             "==============================",
             f"Balance:          £{bal:.2f}",
             f"Cumulative P&L:   {profit_sign}£{profit:.2f}  (win + place)",
+            f"True total P&L:   {'+' if state.get('total_pnl',0)>=0 else ''}£{state.get('total_pnl',0):.2f}  (never reset)",
             f"Banked profit:    £{state.get('banked_profit', 0.0):.2f}",
             tier_profit_summary(state),
             f"Betting:          {'⏸️ PAUSED' if paused else '▶️ ACTIVE'}",
