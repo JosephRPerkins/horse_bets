@@ -23,6 +23,7 @@ Commands:
   /streakstatus — streak stake, P&L, win streak
   /status       — balance, mode, today's P&L, tier pot summary
   /races        — today's qualifying races with stakes
+  /settle       — retry settlement of any pending unsettled races
   /help         — command list
 """
 
