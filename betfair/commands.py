@@ -100,6 +100,8 @@ HELP_TEXT = """\
 
 /status       — full status: balance, mode, tier pots
 /races        — today's qualifying races with stakes
+/settle       — retry settlement of any pending unsettled races
+
 /help         — this list
 ══════════════════════════════
 <b>System C tiers</b>
@@ -498,6 +500,26 @@ def handle_command(cmd: str, state: dict) -> None:
     elif cmd == "/races":
         send_chunks(_races_status(state))
 
+    elif cmd == "/settle":
+        pending = state.get("pending_settlements", {})
+        if not pending:
+            send("✅ No pending settlements.")
+            return
+        send(f"🔄 Re-settling {len(pending)} pending races...")
+        import threading
+        from betfair_main import _paper_settle
+        for race_id, payload in list(pending.items()):
+            t = threading.Thread(
+                target=_paper_settle,
+                args=(payload["race"], payload["paper_bets"], state),
+                kwargs={"place_bets": payload.get("place_bets"), "silent": True},
+                daemon=True,
+                name=f"PaperSettle_{race_id}",
+            )
+            t.start()
+        send(f"🔄 Settlement threads launched for {len(pending)} races. Check logs for results.")
+        logger.info(f"/settle: launched {len(pending)} settlement threads")
+  
     elif cmd == "/help":
         send(HELP_TEXT)
 
