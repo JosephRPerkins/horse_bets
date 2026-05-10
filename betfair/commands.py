@@ -513,7 +513,7 @@ def handle_command(cmd: str, state: dict) -> None:
             t = threading.Thread(
                 target=_paper_settle,
                 args=(payload["race"], payload["paper_bets"], state),
-                kwargs={"place_bets": payload.get("place_bets"), "silent": True},
+                kwargs={"place_bets": payload.get("place_bets"), "silent": False},
                 daemon=True,
                 name=f"PaperSettle_{race_id}",
             )
