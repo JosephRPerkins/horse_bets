@@ -100,9 +100,9 @@ def win_stake_for_pick(sp: float, score: float) -> float:
 
     Betfair minimum enforced — all non-zero stakes are >= £2.
     """
-    if not sp or not score:
+    if not sp or sp < 1.1:
         return 0.0
-    if score < 3 or sp < 2.0:
+    if score < 3:
         return 0.0
     if sp < 6.0:
         return 2.0
