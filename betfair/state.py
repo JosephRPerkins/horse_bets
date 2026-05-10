@@ -51,6 +51,8 @@ def _empty() -> dict:
         "paper_daily_pnl":     0.0,
         "paper_daily_bets":    [],
         "cumulative_profit":   0.0,
+        "total_pnl":           0.0,
+        "daily_pnl_log":       {},
         "profit_milestone":    0.0,
         "paper_place_pnl":     0.0,
         "banked_profit":       0.0,
@@ -166,7 +168,21 @@ def reset_daily(state: dict) -> dict:
         # ── Paper mode: preserve cumulative as-is, no banking ─────────────────
         profit = state.get("cumulative_profit", 0.0)
         state["day_start_pot"] = profit
-        logger.info(f"Daily reset (paper): cumulative preserved at £{profit:.2f}")
+
+        # Log daily P&L to persistent history so cumulative can be reconstructed
+        yesterday = (date.today() - __import__('datetime').timedelta(days=1)).strftime("%Y-%m-%d")
+        day_win   = state.get("paper_daily_pnl", 0.0)
+        day_place = state.get("paper_place_pnl", 0.0)
+        daily_log = state.get("daily_pnl_log", {})
+        daily_log[yesterday] = {
+            "win":      round(day_win, 2),
+            "place":    round(day_place, 2),
+            "combined": round(day_win + day_place, 2),
+            "closing_cumulative": round(profit, 2),
+        }
+        state["daily_pnl_log"] = daily_log
+        logger.info(f"Daily reset (paper): cumulative preserved at £{profit:.2f}, "
+                    f"yesterday combined £{day_win+day_place:.2f} logged")
 
     # Reset streak daily counters — stake resets to current tier
     if state.get("streak_active", False):
@@ -282,14 +298,16 @@ def tier_profit_summary(state: dict) -> str:
 
 def update_cumulative_profit(state: dict, pnl: float) -> list:
     """
-    Add pnl to cumulative_profit and check for milestone notifications.
+    Add pnl to cumulative_profit and total_pnl, check for milestone notifications.
     Thread-safe — uses _state_lock to prevent race conditions between
     concurrent settlement threads overwriting each other's updates.
     """
-    prev    = state.get("cumulative_profit", 0.0)
-    updated = round(prev + pnl, 2)
-    state["cumulative_profit"] = updated
-    save(state)
+    with _state_lock:
+        prev    = state.get("cumulative_profit", 0.0)
+        updated = round(prev + pnl, 2)
+        state["cumulative_profit"] = updated
+        state["total_pnl"] = round(state.get("total_pnl", 0.0) + pnl, 2)
+        save(state)
 
     alerts    = []
     milestone = state.get("profit_milestone", 0.0)
