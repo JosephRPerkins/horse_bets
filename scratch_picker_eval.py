@@ -117,6 +117,7 @@ def score_margin(scores):
 # ── Normalise a value within its field ────────────────────────────────────────
 
 def normalise(val, field_vals, scale=10.0):
+    if val is None: return None
     valid = [v for v in field_vals if v is not None]
     if not valid or len(valid) < 2: return scale/2
     lo, hi = min(valid), max(valid)
@@ -220,22 +221,10 @@ def evaluate_picker(races, score_fn, label="", require_signals=None):
 
         # Signal coverage check
         if require_signals:
-            for sig_fn in require_signals:
-                vals = [sig_fn(r) for r in runners]
-                coverage = sum(1 for v in vals if v is not None) / len(runners)
-                if coverage < 0.5:
-                    n_skip_sig += 1
-                    break
-            else:
-                pass  # all signals ok — fall through
-            # If we broke out, skip this race
-            else_ran = True
-            # Redo the check properly
             skip = False
             for sig_fn in require_signals:
                 vals = [sig_fn(r) for r in runners]
-                coverage = sum(1 for v in vals if v is not None) / len(runners)
-                if coverage < 0.5:
+                if sum(1 for v in vals if v is not None) / len(runners) < 0.5:
                     skip = True
                     break
             if skip:
