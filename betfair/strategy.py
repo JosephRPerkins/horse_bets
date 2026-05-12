@@ -1,29 +1,28 @@
 """
 betfair/strategy.py
 
-Bet qualification and stake calculation — System C.
+Bet qualification and stake calculation — v3 evidence-based rules.
 
-Tier-specific independent stake cascades:
-  ELITE:  £2 → £4 at £30 profit,  £4 → £6 at £60 profit
-  STRONG: £2 → £4 at £50 profit,  £4 → £6 at £100 profit
-  GOOD:   £2 → £4 at £75 profit,  £4 → £6 at £150 profit
+Changes from previous version (validated on clean backtest, 520 races):
+  - FLAT STAKES: £2 on everything. Variable staking amplified losses —
+    biggest stakes went on longest-priced losers, smallest on short-priced
+    winners. Flat £2 gives +£218 over 520 races vs variable staking which
+    adds noise and variance without improving expectancy.
 
-Each tier tracks its own profit independently. A STRONG winning streak
-does not inflate GOOD stakes, and vice versa.
+  - PLACE BETS — JUMPS ONLY: Place bets on flat races lose -£0.13/bet
+    across 373 races. Place bets on hurdles return +£0.46/bet and chases
+    +£0.25/bet. Jump place bets retained, flat place bets removed entirely.
+
+  - P2 WIN BETS REMOVED: P2 win bets add noise. Win bet is P1 only.
+    P2 place bet retained for jump races where P2 also has place value.
 
 Betting rules:
-  ELITE + STRONG: WIN P1, WIN P2, PLACE P1, PLACE P2 (8+ runners only)
-  GOOD:           WIN P1, WIN P2 only (no place bets)
-  STANDARD/WEAK:  No bet
-  SKIP:           No bet
+  ELITE/STRONG/GOOD: WIN P1 (flat £2)
+  ELITE/STRONG/GOOD + jump race + 8+ runners: PLACE P1 + PLACE P2 (£2 each)
+  STANDARD/WEAK/SKIP: No bet
 
-No odds-on skips. No score-gap redirects. No P2 price redirects.
-P1 and P2 are always backed at the same stake when both qualify on price.
-Place bets use the same stake as win bets for that tier.
-
-Minimum prices:
-  P1: 1.20 (back anything with meaningful odds)
-  P2: 2.00 (avoid backing near-certainties as value picks)
+Minimum price: 1.10 (back almost anything)
+No variable staking. No score-gap logic. No redirects.
 """
 
 import sys
@@ -36,138 +35,107 @@ from predict_v2 import (
 
 # ── Price gates ────────────────────────────────────────────────────────────────
 
-MIN_PICK1_PRICE = 1.20   # back P1 at almost any odds
-MIN_PICK2_PRICE = 2.00   # P2 must offer some value
-MIN_BACK_PRICE  = 1.05   # exchange minimum — BSP always fills regardless
-MIN_LIQUIDITY   = 2.00   # minimum matched volume before placing
+MIN_PICK1_PRICE = 1.10
+MIN_PICK2_PRICE = 1.10
+MIN_BACK_PRICE  = 1.05
+MIN_LIQUIDITY   = 2.00
 
 # ── Going / surface filters ────────────────────────────────────────────────────
 
 SKIP_GOING_KEYS = {"heavy", "soft to heavy", "heavy to soft"}
 
-# Irish NH races in attrition conditions — historically unpredictable
 ATTRITION_VENUES  = {"fairyhouse", "cork", "punchestown", "naas", "leopardstown"}
 ATTRITION_GOING   = {"soft", "yielding to soft", "soft to heavy", "heavy"}
 ATTRITION_DIST_F  = 20.0
 
-# ── Tier-specific stake cascades ───────────────────────────────────────────────
-# Format: [(min_profit, stake), ...]
-# Profit tracked independently per tier.
+# ── Stake ──────────────────────────────────────────────────────────────────────
 
+FLAT_STAKE = 2.0
+
+# Tier-specific stake thresholds kept for display/briefing compatibility
+# All return flat £2 regardless of profit pot
 TIER_STAKE_THRESHOLDS = {
-    TIER_ELITE:  [(0, 2.0), (50,  4.0), (100,  6.0)],
-    TIER_STRONG: [(0, 2.0), (50,  4.0), (100, 6.0)],
-    TIER_GOOD:   [(0, 2.0), (50,  4.0), (100, 6.0)],
-    TIER_STD:    [(0, 2.0), (50,  4.0), (100, 6.0)],
+    TIER_ELITE:  [(0, 2.0)],
+    TIER_STRONG: [(0, 2.0)],
+    TIER_GOOD:   [(0, 2.0)],
+    TIER_STD:    [(0, 2.0)],
 }
 
-# Bet tiers — races in these tiers qualify for betting
-BET_TIERS = {TIER_ELITE, TIER_STRONG, TIER_GOOD, TIER_STD}
+BET_TIERS       = {TIER_ELITE, TIER_STRONG, TIER_GOOD}
+PLACE_BET_TIERS = {TIER_ELITE, TIER_STRONG, TIER_GOOD}
 
-# Place bet tiers — only ELITE and STRONG get place bets
-PLACE_BET_TIERS = {TIER_ELITE, TIER_STRONG, TIER_GOOD, TIER_STD}
-
-# Minimum runners for place bets (Betfair pays 3 places at 8+)
 MIN_RUNNERS_FOR_PLACE = 8
 
 
+def _is_jump_race(race: dict) -> bool:
+    rtype = (race.get("type") or "").lower()
+    return any(t in rtype for t in ("chase", "hurdle", "nh flat", "national hunt"))
+
+
 def get_stake(profit: float, tier: int) -> float:
-    """
-    Return per-horse win stake based on this tier's cumulative profit.
-    Each tier has its own independent profit pot.
-    NOTE: win bets now use score+SP based staking via win_stake_for_pick().
-    This function is retained for briefing/display purposes.
-    """
-    thresholds = TIER_STAKE_THRESHOLDS.get(tier, [(0, 2.0)])
-    stake = thresholds[0][1]
-    for min_profit, s in thresholds:
-        if profit >= min_profit:
-            stake = s
-    return stake
+    """Flat £2 regardless of profit. Kept for display compatibility."""
+    return FLAT_STAKE
 
 
 def win_stake_for_pick(sp: float, score: float) -> float:
     """
-    Return win bet stake for a pick based on SP and SP-free score.
-
-    Rules (from staking grid analysis across 1,571 races):
-      - Only bet if score >= 3 AND SP >= 3.0
-      - Stake scales with SP:
-          3.0 - 6.0:  £2
-          6.0 - 10.0: £4
-          10.0+:      £6
-      - Below threshold: £0 (skip)
-
-    Betfair minimum enforced — all non-zero stakes are >= £2.
+    Flat £2 win stake for P1.
+    Previous variable staking (£2/£4/£6 by SP band) amplified losses
+    on longer-priced losers without improving expectancy.
+    Only gate is minimum price.
     """
-    if not sp or sp < 1.1:
+    if not sp or sp < MIN_PICK1_PRICE:
         return 0.0
-    if score < 3:
+    return FLAT_STAKE
+
+
+def place_stake_for_pick(score: float, tier: int, sp: float = 0.0,
+                          is_jump: bool = False, n_runners: int = 0) -> float:
+    """
+    Place bet on P1 for jump races only (hurdles +£0.46/bet, chases +£0.25/bet).
+    Flat place bets lose -£0.13/bet across 373 races — excluded.
+    Minimum 8 runners for place market to pay 3 places.
+    """
+    if not is_jump:
         return 0.0
-    if sp < 6.0:
-        return 2.0
-    if sp < 10.0:
-        return 4.0
-    return 6.0
-
-
-def place_stake_for_pick(score: float, tier: int, sp: float = 0.0) -> float:
-    """
-    Place bet on P2 only when:
-    - score >= 4 (strong stats — places 76% of the time)
-    - OR score >= 3 AND SP >= 5 (longer odds with genuine value)
-    Short-priced P2s below 3/1 lose money regardless of score.
-    """
     if tier not in PLACE_BET_TIERS:
         return 0.0
-    if not score:
+    if n_runners < MIN_RUNNERS_FOR_PLACE:
         return 0.0
-    if score >= 4:
-        return 2.0
-    if score >= 3 and sp >= 5.0:
-        return 2.0
-    return 0.0
+    return FLAT_STAKE
+
+
+def p2_place_stake(sp: float, is_jump: bool = False,
+                   n_runners: int = 0) -> float:
+    """
+    P2 place bet for jump races only, 8+ runners.
+    P2 win bets removed — added noise without improving expectancy.
+    """
+    if not is_jump:
+        return 0.0
+    if n_runners < MIN_RUNNERS_FOR_PLACE:
+        return 0.0
+    if not sp or sp < MIN_PICK2_PRICE:
+        return 0.0
+    return FLAT_STAKE
+
 
 def p2_win_stake_for_pick(sp: float, score: float) -> float:
-    """
-    P2 win bet stake. Only bet when score>=4 AND SP>=3.0.
-    Analysis across 218 bets shows 33% win rate vs 31% breakeven at worst band.
-    Flat £2 stake (Betfair minimum).
-    """
-    if not sp or not score:
-        return 0.0
-    if score < 4 or sp < 3.0:
-        return 0.0
-    return 2.0
+    """P2 win bets removed. Returns 0. Kept for API compatibility."""
+    return 0.0
 
 
 def get_place_stake(profit: float, tier: int = TIER_STD) -> float:
-    """
-    Legacy function — retained for display/briefing purposes.
-    Actual place staking now uses place_stake_for_pick().
-    """
-    if tier not in PLACE_BET_TIERS:
-        return 0.0
-    return 2.0
+    """Legacy function — retained for display/briefing compatibility."""
+    return FLAT_STAKE
 
 
 def next_tier_threshold(profit: float, tier: int) -> float:
-    """
-    Return the next profit milestone for this tier's stake to increase.
-    Returns current threshold if already at maximum.
-    """
-    thresholds = TIER_STAKE_THRESHOLDS.get(tier, [(0, 2.0)])
-    for min_profit, _ in thresholds:
-        if profit < min_profit:
-            return float(min_profit)
-    return float(thresholds[-1][0])
+    """Returns 0 — no stake escalation thresholds in flat staking."""
+    return 0.0
 
 
 def min_liquidity_for_price(price: float, stake: float) -> float:
-    """
-    Minimum matched volume required before placing.
-    Scales with price — higher-priced horses need more liquidity.
-    """
     multiplier = min(price / 5.0, 4.0)
     return max(MIN_LIQUIDITY, round(stake * multiplier, 2))
 
@@ -175,7 +143,6 @@ def min_liquidity_for_price(price: float, stake: float) -> float:
 # ── Race qualification ─────────────────────────────────────────────────────────
 
 def _is_attrition_risk(race: dict) -> bool:
-    """Irish NH races in soft/heavy going at staying distances."""
     course    = (race.get("course") or "").lower()
     going     = (race.get("going")  or "").lower()
     race_type = (race.get("type")   or "").lower()
@@ -197,13 +164,6 @@ def _is_attrition_risk(race: dict) -> bool:
 def qualifies(race: dict) -> bool:
     """
     Return True if the race passes all pre-bet filters.
-
-    Filters applied:
-    - Going: skip heavy/soft-to-heavy
-    - Attrition: skip Irish NH staying races in soft ground
-    - Tier: must be ELITE, STRONG, or GOOD
-    - Picks: must have both top1 and top2 populated
-    - Field: must have runners list (for RPR check)
     """
     going = (race.get("going") or "").lower()
     tier  = race.get("tier")
@@ -217,32 +177,26 @@ def qualifies(race: dict) -> bool:
     if tier not in BET_TIERS:
         return False
 
-    if not race.get("top1") or not race.get("top2"):
+    if not race.get("top1"):
         return False
 
     return True
 
 
 def should_back_pick1(pick1_price) -> bool:
-    """P1 qualifies if it meets the minimum price."""
     if not pick1_price:
         return False
     return pick1_price >= MIN_PICK1_PRICE
 
 
 def should_back_pick2(pick2_price) -> bool:
-    """P2 qualifies if it meets the minimum price."""
     if not pick2_price:
         return False
     return pick2_price >= MIN_PICK2_PRICE
 
 
 def should_place_bet(tier: int, n_runners: int) -> bool:
-    """
-    Place bets only on ELITE and STRONG, with 8+ runners.
-    With fewer than 8 runners Betfair pays only 2 places (5-7)
-    or win only (<=4), reducing value significantly.
-    """
+    """Place bets gated by jump race check in place_stake_for_pick."""
     return tier in PLACE_BET_TIERS and n_runners >= MIN_RUNNERS_FOR_PLACE
 
 
@@ -252,50 +206,34 @@ def pick_stakes(
     pick1_price,
     pick2_price,
     n_runners:    int = 0,
+    is_jump:      bool = False,
 ) -> tuple:
     """
     Return (stake_p1_win, stake_p2_win, stake_place).
 
-    profit:      this tier's cumulative net profit
-    tier:        System C tier (ELITE/STRONG/GOOD)
-    pick1_price: SP or exchange price for P1
-    pick2_price: SP or exchange price for P2
-    n_runners:   actual runners in race (for place bet gate)
-
-    Rules:
-    - Both P1 and P2 backed at same stake if they meet price gates
-    - Place bets only on ELITE+STRONG, 8+ runners
-    - No redirects, no odds-on skips, no gap-based switching
-    - Returns (0, 0, 0) if tier doesn't qualify
+    v3 rules:
+    - P1 win: flat £2 if price >= 1.10
+    - P2 win: always 0 (removed)
+    - Place: flat £2 on P1 for jump races with 8+ runners only
     """
     if tier not in BET_TIERS:
         return 0.0, 0.0, 0.0
 
-    stake = get_stake(profit, tier)
-
-    p1_ok = should_back_pick1(pick1_price)
-    p2_ok = should_back_pick2(pick2_price)
-
-    s1 = stake if p1_ok else 0.0
-    s2 = stake if p2_ok else 0.0
-
-    # Place bets: same stake, ELITE+STRONG, 8+ runners
-    sp = stake if should_place_bet(tier, n_runners) else 0.0
+    s1 = FLAT_STAKE if should_back_pick1(pick1_price) else 0.0
+    s2 = 0.0  # P2 win bets removed
+    sp = FLAT_STAKE if (is_jump and should_place_bet(tier, n_runners)) else 0.0
 
     return s1, s2, sp
+
 
 def apply_liquidity(
     stake_a:  float,
     stake_b:  float,
     liq_a:    float,
     liq_b:    float,
-    redirect: bool = False,) -> tuple:
-    """
-    Liquidity stub — all bets placed as BSP so liquidity checks are bypassed.
-    Always returns full stakes as placeable. Kept for compatibility with
-    betfair_main.py until a full refactor removes liquidity logic entirely.
-    Returns (actual_a, actual_b, skipped=False, reason="").
-    """
+    redirect: bool = False,
+) -> tuple:
+    """BSP bets — liquidity checks bypassed. Kept for compatibility."""
     if stake_a == 0 and stake_b == 0:
         return 0.0, 0.0, True, "zero stakes"
     if redirect:
