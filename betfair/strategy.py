@@ -1,28 +1,39 @@
 """
 betfair/strategy.py
 
-Bet qualification and stake calculation — v3 evidence-based rules.
+Bet qualification and stake calculation — v3.1 evidence-based rules.
 
-Changes from previous version (validated on clean backtest, 520 races):
-  - FLAT STAKES: £2 on everything. Variable staking amplified losses —
-    biggest stakes went on longest-priced losers, smallest on short-priced
-    winners. Flat £2 gives +£218 over 520 races vs variable staking which
-    adds noise and variance without improving expectancy.
+Changes from v3 (validated on clean backtest, 348 races):
 
-  - PLACE BETS — JUMPS ONLY: Place bets on flat races lose -£0.13/bet
-    across 373 races. Place bets on hurdles return +£0.46/bet and chases
-    +£0.25/bet. Jump place bets retained, flat place bets removed entirely.
+  STAKING:
+  - Chase: £4 (128.6% ROI, 35 races, Kelly 5.2% bankroll)
+  - Hurdle: £2 (7.6% ROI, marginal but positive)
+  - Flat: £2 (negative ROI on win bets alone; P1 only)
+  - No variable staking by SP, tier, or market rank — insufficient data
+    to justify reducing stakes on short-priced horses or increasing on
+    long-priced ones. Sample sizes too small to trade away simplicity.
 
-  - P2 WIN BETS REMOVED: P2 win bets add noise. Win bet is P1 only.
-    P2 place bet retained for jump races where P2 also has place value.
+  BET STRUCTURE (Strategy H — +£148 vs +£92 baseline over 348 races):
+  - Flat:    P1 win only (£2)
+  - Chase:   P1 win (£4) + P1 place (£2, 8+ runners)
+  - NH Flat: P1 win (£2) + P1 place (£2, 8+ runners)
+  - Hurdle:  P1 win (£2) + P2 win (£2) + P1 place (£2) + P2 place (£2)
+             (place bets 8+ runners only)
 
-Betting rules:
-  ELITE/STRONG/GOOD: WIN P1 (flat £2)
-  ELITE/STRONG/GOOD + jump race + 8+ runners: PLACE P1 + PLACE P2 (£2 each)
-  STANDARD/WEAK/SKIP: No bet
+  WHY HURDLE P2 WIN:
+  - Hurdle P2 wins at 27% vs P1 at 25% — P2 actually outperforms P1
+  - P2 win returns +£0.796/bet on hurdles vs -£0.930/bet on chase
+  - Chase P2 win actively harmful — excluded entirely
 
-Minimum price: 1.10 (back almost anything)
-No variable staking. No score-gap logic. No redirects.
+  WHY CHASE £4:
+  - Chase P1 win: +£3.253/bet, 34% win rate, avg SP 7.46
+  - Chase ELITE/STRONG: +£4.973/bet, 248.7% ROI
+  - Kelly quarter-fraction = £1.04/£20 bankroll ~ £4 practical stake
+
+  WHY NOT MORE COMPLEX:
+  - SP-band staking, tier-based staking, market-rank staking all tested
+  - Chase type is the single cleanest signal to stake on
+  - Adding more conditions risks overfitting on 348 races
 """
 
 import sys
@@ -48,12 +59,12 @@ ATTRITION_VENUES  = {"fairyhouse", "cork", "punchestown", "naas", "leopardstown"
 ATTRITION_GOING   = {"soft", "yielding to soft", "soft to heavy", "heavy"}
 ATTRITION_DIST_F  = 20.0
 
-# ── Stake ──────────────────────────────────────────────────────────────────────
+# ── Stakes ─────────────────────────────────────────────────────────────────────
 
-FLAT_STAKE = 2.0
+FLAT_STAKE        = 2.0
+CHASE_WIN_STAKE   = 4.0   # Chase P1 win — 128.6% ROI over 35 races
+PLACE_STAKE       = 2.0   # All place bets flat £2
 
-# Tier-specific stake thresholds kept for display/briefing compatibility
-# All return flat £2 regardless of profit pot
 TIER_STAKE_THRESHOLDS = {
     TIER_ELITE:  [(0, 2.0)],
     TIER_STRONG: [(0, 2.0)],
@@ -72,29 +83,46 @@ def _is_jump_race(race: dict) -> bool:
     return any(t in rtype for t in ("chase", "hurdle", "nh flat", "national hunt"))
 
 
+def _is_hurdle(race: dict) -> bool:
+    rtype = (race.get("type") or "").lower()
+    return "hurdle" in rtype
+
+
+def _is_chase(race: dict) -> bool:
+    rtype = (race.get("type") or "").lower()
+    return "chase" in rtype
+
+
+def _is_nhflat(race: dict) -> bool:
+    rtype = (race.get("type") or "").lower()
+    return "nh flat" in rtype or "national hunt flat" in rtype
+
+
 def get_stake(profit: float, tier: int) -> float:
-    """Flat £2 regardless of profit. Kept for display compatibility."""
     return FLAT_STAKE
 
 
-def win_stake_for_pick(sp: float, score: float) -> float:
+def win_stake_for_pick(sp: float, score: float, is_chase: bool = False) -> float:
     """
-    Flat £2 win stake for P1.
-    Previous variable staking (£2/£4/£6 by SP band) amplified losses
-    on longer-priced losers without improving expectancy.
-    Only gate is minimum price.
+    P1 win stake.
+    Chase: £4 (Kelly-justified, 128.6% ROI over 35 races)
+    All others: £2 flat
     """
     if not sp or sp < MIN_PICK1_PRICE:
         return 0.0
-    return FLAT_STAKE
+    return CHASE_WIN_STAKE if is_chase else FLAT_STAKE
 
 
 def place_stake_for_pick(score: float, tier: int, sp: float = 0.0,
-                          is_jump: bool = False, n_runners: int = 0) -> float:
+                          is_jump: bool = False, n_runners: int = 0,
+                          is_chase: bool = False) -> float:
     """
-    Place bet on P1 for jump races only (hurdles +£0.46/bet, chases +£0.25/bet).
-    Flat place bets lose -£0.13/bet across 373 races — excluded.
-    Minimum 8 runners for place market to pay 3 places.
+    P1 place stake.
+    Flat: none (-£0.127/bet)
+    Chase: £2 (+£0.377/bet)
+    NH Flat: £2 (positive, small sample)
+    Hurdle: £2 (+£0.162/bet on P2; P1 place included in Strategy H)
+    All require 8+ runners.
     """
     if not is_jump:
         return 0.0
@@ -102,36 +130,46 @@ def place_stake_for_pick(score: float, tier: int, sp: float = 0.0,
         return 0.0
     if n_runners < MIN_RUNNERS_FOR_PLACE:
         return 0.0
-    return FLAT_STAKE
+    return PLACE_STAKE
 
 
-def p2_place_stake(sp: float, is_jump: bool = False,
-                   n_runners: int = 0) -> float:
+def p2_win_stake_for_pick(sp: float, score: float,
+                           is_hurdle: bool = False) -> float:
     """
-    P2 place bet for jump races only, 8+ runners.
-    P2 win bets removed — added noise without improving expectancy.
+    P2 win stake — hurdle only.
+    Hurdle P2 win: +£0.796/bet, 27% win rate
+    Chase P2 win: -£0.930/bet — excluded
+    Flat P2 win: -£0.504/bet — excluded
     """
-    if not is_jump:
-        return 0.0
-    if n_runners < MIN_RUNNERS_FOR_PLACE:
+    if not is_hurdle:
         return 0.0
     if not sp or sp < MIN_PICK2_PRICE:
         return 0.0
     return FLAT_STAKE
 
 
-def p2_win_stake_for_pick(sp: float, score: float) -> float:
-    """P2 win bets removed. Returns 0. Kept for API compatibility."""
-    return 0.0
+def p2_place_stake(sp: float, is_jump: bool = False,
+                   n_runners: int = 0, is_hurdle: bool = False) -> float:
+    """
+    P2 place stake — hurdle only, 8+ runners.
+    Hurdle P2 place: +£0.120/bet
+    Chase P2 place: -£0.118/bet — excluded
+    NH Flat P2 place: -£0.225/bet — excluded
+    """
+    if not is_hurdle:
+        return 0.0
+    if n_runners < MIN_RUNNERS_FOR_PLACE:
+        return 0.0
+    if not sp or sp < MIN_PICK2_PRICE:
+        return 0.0
+    return PLACE_STAKE
 
 
 def get_place_stake(profit: float, tier: int = TIER_STD) -> float:
-    """Legacy function — retained for display/briefing compatibility."""
-    return FLAT_STAKE
+    return PLACE_STAKE
 
 
 def next_tier_threshold(profit: float, tier: int) -> float:
-    """Returns 0 — no stake escalation thresholds in flat staking."""
     return 0.0
 
 
@@ -162,24 +200,17 @@ def _is_attrition_risk(race: dict) -> bool:
 
 
 def qualifies(race: dict) -> bool:
-    """
-    Return True if the race passes all pre-bet filters.
-    """
     going = (race.get("going") or "").lower()
     tier  = race.get("tier")
 
     if any(k in going for k in SKIP_GOING_KEYS):
         return False
-
     if _is_attrition_risk(race):
         return False
-
     if tier not in BET_TIERS:
         return False
-
     if not race.get("top1"):
         return False
-
     return True
 
 
@@ -196,7 +227,6 @@ def should_back_pick2(pick2_price) -> bool:
 
 
 def should_place_bet(tier: int, n_runners: int) -> bool:
-    """Place bets gated by jump race check in place_stake_for_pick."""
     return tier in PLACE_BET_TIERS and n_runners >= MIN_RUNNERS_FOR_PLACE
 
 
@@ -207,23 +237,36 @@ def pick_stakes(
     pick2_price,
     n_runners:    int = 0,
     is_jump:      bool = False,
+    is_hurdle:    bool = False,
+    is_chase:     bool = False,
 ) -> tuple:
     """
-    Return (stake_p1_win, stake_p2_win, stake_place).
+    Return (stake_p1_win, stake_p2_win, stake_p1_place, stake_p2_place).
 
-    v3 rules:
-    - P1 win: flat £2 if price >= 1.10
-    - P2 win: always 0 (removed)
-    - Place: flat £2 on P1 for jump races with 8+ runners only
+    Strategy H:
+    - Flat:    P1 win £2
+    - Chase:   P1 win £4 + P1 place £2 (8+ runners)
+    - NH Flat: P1 win £2 + P1 place £2 (8+ runners)
+    - Hurdle:  P1 win £2 + P2 win £2 + P1 place £2 + P2 place £2 (8+ runners)
     """
     if tier not in BET_TIERS:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0
 
-    s1 = FLAT_STAKE if should_back_pick1(pick1_price) else 0.0
-    s2 = 0.0  # P2 win bets removed
-    sp = FLAT_STAKE if (is_jump and should_place_bet(tier, n_runners)) else 0.0
+    has_place = is_jump and n_runners >= MIN_RUNNERS_FOR_PLACE
 
-    return s1, s2, sp
+    s1_win = win_stake_for_pick(pick1_price, 0.0, is_chase=is_chase) \
+             if should_back_pick1(pick1_price) else 0.0
+
+    s2_win = p2_win_stake_for_pick(pick2_price, 0.0, is_hurdle=is_hurdle) \
+             if should_back_pick2(pick2_price) else 0.0
+
+    s1_plc = PLACE_STAKE if has_place else 0.0
+
+    s2_plc = p2_place_stake(pick2_price, is_jump=is_jump,
+                             n_runners=n_runners, is_hurdle=is_hurdle) \
+             if should_back_pick2(pick2_price) else 0.0
+
+    return s1_win, s2_win, s1_plc, s2_plc
 
 
 def apply_liquidity(
@@ -233,7 +276,6 @@ def apply_liquidity(
     liq_b:    float,
     redirect: bool = False,
 ) -> tuple:
-    """BSP bets — liquidity checks bypassed. Kept for compatibility."""
     if stake_a == 0 and stake_b == 0:
         return 0.0, 0.0, True, "zero stakes"
     if redirect:
