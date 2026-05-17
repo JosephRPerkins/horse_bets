@@ -11,28 +11,23 @@ Modes (toggle via Telegram):
            Paper ALWAYS runs in the background even in live mode.
   /live  - real bets placed on Betfair Exchange. Full balance-log settlement.
 
-Staking: FLAT £2 on all win bets (evidence-based, validated on 520 races)
-  Variable staking amplified losses — biggest stakes on longest-priced losers.
-  Flat £2 gives +£218 over 520 races vs variable staking.
-  Stakes never change regardless of profit pot or tier.
+Staking — Strategy H (validated on 348 races, +£148 vs +£92 baseline):
+  Chase:   P1 win £4 (128.6% ROI, Kelly-justified)
+  Hurdle:  P1 win £2 + P2 win £2 + P1 place £2 + P2 place £2 (8+ runners)
+  NH Flat: P1 win £2 + P1 place £2 (8+ runners)
+  Flat:    P1 win £2 only
 
-Bets placed:
-  WIN:   P1 only, flat £2, minimum price 1.10
-  PLACE: P1 + P2, flat £2 each, JUMP RACES ONLY, 8+ runners only
-         Flat place bets lose -£0.13/bet (373 races). Jump place bets
-         return +£0.46/bet hurdles, +£0.25/bet chases.
-  P2 WIN BETS: removed — added noise without improving expectancy.
+  Chase P2 win removed (-£0.930/bet). Flat place bets removed (-£0.127/bet).
+  Hurdle P2 win added (+£0.796/bet, 27% win rate — outperforms P1).
 
 BSP fallback:
   When exchange liquidity is below the dynamic threshold for a horse's price,
   the bot falls back to a MARKET_ON_CLOSE (BSP) order rather than skipping.
   In paper mode, the Racing API SP is used as the BSP proxy at settlement.
-  This ensures long-odds winners at thin markets are not missed.
 
 Streak tracker:
   Uses actual Betfair place market prices captured at bet time.
   Tracks both standard and conservative compounding streaks.
-  Fires a Telegram update after every race settlement via send().
 
 Bet timing: T-5 minutes before race off.
 
@@ -67,6 +62,7 @@ from betfair.strategy    import (
     MIN_BACK_PRICE, MIN_LIQUIDITY, MIN_PICK1_PRICE, MIN_PICK2_PRICE,
     should_back_pick1, should_back_pick2, min_liquidity_for_price,
     next_tier_threshold, BET_TIERS, apply_liquidity, p2_win_stake_for_pick,
+    p2_place_stake,
 )
 from predict_v2 import TIER_ELITE, TIER_STRONG, TIER_GOOD, TIER_STD, TIER_SKIP, TIER_LABELS
 from betfair.state       import (
@@ -101,6 +97,16 @@ BET_BEFORE_MINUTES = 5
 def _is_jump_race(race: dict) -> bool:
     rtype = (race.get("type") or "").lower()
     return any(t in rtype for t in ("chase", "hurdle", "nh flat", "national hunt"))
+
+
+def _is_hurdle_race(race: dict) -> bool:
+    rtype = (race.get("type") or "").lower()
+    return "hurdle" in rtype
+
+
+def _is_chase_race(race: dict) -> bool:
+    rtype = (race.get("type") or "").lower()
+    return "chase" in rtype
 
 
 # ── Card loading ──────────────────────────────────────────────────────────────
@@ -527,8 +533,9 @@ def _live_bet_job(race: dict, state: dict):
     a_name = top1.get("horse", "?")
     b_name = top2.get("horse", "?")
 
-    # Determine race context for place bet gating
     is_jump   = _is_jump_race(race)
+    is_hurdle = _is_hurdle_race(race)
+    is_chase  = _is_chase_race(race)
     n_runners = len(race.get("all_runners") or [])
 
     mkt, odds, bf_runners = _get_market(race)
@@ -581,11 +588,12 @@ def _live_bet_job(race: dict, state: dict):
     a_score = _sp_free_score(top1) if top1 else 0
     b_score = _sp_free_score(top2) if top2 else 0
 
-    # Flat £2 win stake on P1 only — no P2 win bet
-    stake_a     = win_stake_for_pick(a_live, a_score)
-    stake_b     = 0.0
+    # Strategy H stakes
+    stake_a     = win_stake_for_pick(a_live, a_score, is_chase=is_chase)
+    stake_b     = p2_win_stake_for_pick(b_live, b_score, is_hurdle=is_hurdle)
     stake_place = place_stake_for_pick(b_score, tier, sp=b_live or 0.0,
-                                       is_jump=is_jump, n_runners=n_runners)
+                                       is_jump=is_jump, n_runners=n_runners,
+                                       is_chase=is_chase)
 
     if stake_a == 0:
         reason = f"Pick 1 {a_name} @ {a_live} below min price" if a_live else "no price"
@@ -594,10 +602,13 @@ def _live_bet_job(race: dict, state: dict):
 
     actual_a, actual_b, skipped, _ = apply_liquidity(stake_a, 0.0, 0.0, 0.0)
 
+    p2_win_note = f" | P2 win: £{stake_b:.0f}" if stake_b > 0 else ""
     lines = [
         f"💰 <b>LIVE BET - {race_label}</b>",
         f"{tier_label}",
         f"Balance: £{balance:.2f} | {tier_profit_summary(state)}",
+        f"P1 win: £{stake_a:.0f}{p2_win_note} | Place: £{stake_place:.0f}"
+        + (" (jump only)" if stake_place > 0 else ""),
         "------------------------------",
     ]
 
@@ -618,6 +629,12 @@ def _live_bet_job(race: dict, state: dict):
     bet_a = _try_back(a_sel_id, a_name, actual_a, "⭐ Pick 1", a_live)
     if bet_a:
         bets_placed.append(bet_a)
+
+    # P2 win bet — hurdle only
+    if stake_b > 0 and b_sel_id:
+        bet_b = _try_back(b_sel_id, b_name, stake_b, "🔵 Pick 2 win", b_live)
+        if bet_b:
+            bets_placed.append(bet_b)
 
     if not bets_placed:
         send("\n".join(lines))
@@ -644,7 +661,7 @@ def _live_bet_job(race: dict, state: dict):
             "market_id":            market_id,
         })
 
-    # ── Live place bets (jump races only) ─────────────────────────────────────
+    # ── Live place bets ───────────────────────────────────────────────────────
     live_place_bets = []
     cons_places     = _race_cons_places(race)
 
@@ -654,10 +671,16 @@ def _live_bet_job(race: dict, state: dict):
             if place_mkt is not None:
                 place_odds_map = get_market_odds(place_mkt.market_id)
                 place_runners  = place_mkt.runners or []
+                place_type     = "hurdle" if is_hurdle else "chase/jump"
                 place_lines    = ["------------------------------",
-                                  f"📍 <b>Place bets — jump race</b>"]
+                                  f"📍 <b>Place bets — {place_type}</b>"]
 
-                for horse in [a_name, b_name]:
+                # Strategy H: P1 place all jump; P2 place hurdle only
+                place_horses = [a_name]
+                if is_hurdle and b_name and b_name != "?":
+                    place_horses.append(b_name)
+
+                for horse in place_horses:
                     if not horse or horse == "?":
                         continue
                     sel_id = find_selection_id(horse, place_runners)
@@ -722,8 +745,9 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
     a_name = top1.get("horse", "?")
     b_name = top2.get("horse", "?")
 
-    # Race context for place bet gating
     is_jump   = _is_jump_race(race)
+    is_hurdle = _is_hurdle_race(race)
+    is_chase  = _is_chase_race(race)
     n_runners = len(race.get("all_runners") or [])
 
     mkt, odds, bf_runners = _get_market(race)
@@ -788,16 +812,16 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                 send(f"⏭️ 📝 <b>PAPER SKIP - {race_label}</b>\n🔵 Pick 2 {b_name} - NR, no viable substitute")
             return
 
-    # ── Stake calculation ─────────────────────────────────────────────────────
+    # ── Stake calculation — Strategy H ───────────────────────────────────────
     from predict_v2 import _sp_free_score
     a_score = _sp_free_score(top1) if top1 else 0
     b_score = _sp_free_score(top2) if top2 else 0
 
-    # Flat £2 win on P1 only. Place bets on jump races only.
-    stake_a     = win_stake_for_pick(a_live, a_score)
-    stake_b     = 0.0
+    stake_a     = win_stake_for_pick(a_live, a_score, is_chase=is_chase)
+    stake_b     = p2_win_stake_for_pick(b_live or 0.0, b_score, is_hurdle=is_hurdle)
     stake_place = place_stake_for_pick(b_score, tier, sp=b_live or 0.0,
-                                       is_jump=is_jump, n_runners=n_runners)
+                                       is_jump=is_jump, n_runners=n_runners,
+                                       is_chase=is_chase)
 
     if stake_a == 0:
         if not silent:
@@ -807,18 +831,21 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
 
     actual_a, _, _, _ = apply_liquidity(stake_a, 0.0, 0.0, 0.0)
 
-    # ── Build paper bets ──────────────────────────────────────────────────────
-    paper_bets = []
+    # ── Build notification ────────────────────────────────────────────────────
+    p2_win_note = f" | P2 win: £{stake_b:.0f}" if stake_b > 0 else ""
     lines = [
         f"📝 <b>PAPER BET - {race_label}</b>",
         f"{tier_label}",
         f"Balance: £{balance:.2f} | Profit: £{profit:.2f} | "
-        f"P1 win: £{stake_a:.0f} | Place: £{stake_place:.0f}"
+        f"P1 win: £{stake_a:.0f}{p2_win_note} | Place: £{stake_place:.0f}"
         + (" (jump only)" if stake_place > 0 else ""),
         "------------------------------",
     ]
     if not mkt_ok:
         lines.append("⚠️ No Betfair market - using RA odds")
+
+    # ── Paper bets list ───────────────────────────────────────────────────────
+    paper_bets = []
 
     if actual_a > 0:
         sp_display = f"@ {a_live:.2f} " if a_live and a_live >= 1.01 else ""
@@ -828,7 +855,16 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
             "label": "⭐ Pick 1", "bsp": True,
         })
 
-    # ── Place bets (jump races only) ──────────────────────────────────────────
+    # P2 win bet — hurdle races only (Strategy H)
+    if stake_b > 0 and b_name and b_name != "?" and b_live:
+        sp_display_b = f"@ {b_live:.2f} " if b_live >= 1.01 else ""
+        lines.append(f"📝 🔵 Pick 2 (win): {b_name} {sp_display_b}— £{stake_b:.0f}")
+        paper_bets.append({
+            "horse": b_name, "price": None, "stake": stake_b,
+            "label": "🔵 Pick 2", "bsp": True,
+        })
+
+    # ── Place bets — P1 all jump, P2 hurdle only ──────────────────────────────
     place_bets  = []
     cons_places = _race_cons_places(race)
 
@@ -849,10 +885,15 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                         time.sleep(90)
                         place_odds_map = get_market_odds(place_mkt.market_id)
 
+                # Strategy H: P1 place all jump; P2 place hurdle only
+                place_horses = [a_name]
+                if is_hurdle and b_name and b_name != "?":
+                    place_horses.append(b_name)
+                place_type = "hurdle" if is_hurdle else "chase/jump"
                 place_lines = ["------------------------------",
-                               f"📍 <b>Place bets — jump race (£{stake_place:.0f} each)</b>"]
+                               f"📍 <b>Place bets — {place_type} (£{stake_place:.0f} each)</b>"]
 
-                for horse in [a_name, b_name]:
+                for horse in place_horses:
                     if not horse or horse == "?":
                         continue
                     sel_id = find_selection_id(horse, place_runners)
@@ -1127,34 +1168,39 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
         ]
 
         for r in sorted(qualifying, key=lambda x: x.get("off", "99:99")):
-            top1      = r.get("top1") or {}
-            top2      = r.get("top2") or {}
-            tier      = r.get("tier", 0)
-            badge     = (r.get("tier_label") or "·").split()[0]
-            a_price   = top1.get("sp_dec")
-            b_price   = top2.get("sp_dec")
-            r_tier    = r.get("tier", 0)
-            n_r       = len(r.get("all_runners") or [])
-            is_jump_r = _is_jump_race(r)
+            top1        = r.get("top1") or {}
+            top2        = r.get("top2") or {}
+            tier        = r.get("tier", 0)
+            badge       = (r.get("tier_label") or "·").split()[0]
+            a_price     = top1.get("sp_dec")
+            b_price     = top2.get("sp_dec")
+            r_tier      = r.get("tier", 0)
+            n_r         = len(r.get("all_runners") or [])
+            is_jump_r   = _is_jump_race(r)
+            is_hurdle_r = _is_hurdle_race(r)
+            is_chase_r  = _is_chase_race(r)
 
             from predict_v2 import _sp_free_score
             a_score = _sp_free_score(top1) if top1 else 0
             b_score = _sp_free_score(top2) if top2 else 0
 
-            s_a     = win_stake_for_pick(a_price, a_score) if a_price else 0
+            s_a     = win_stake_for_pick(a_price, a_score, is_chase=is_chase_r) if a_price else 0
+            s_b     = p2_win_stake_for_pick(b_price or 0.0, b_score, is_hurdle=is_hurdle_r) if b_price else 0
             s_place = place_stake_for_pick(b_score, r_tier, sp=b_price or 0.0,
-                                           is_jump=is_jump_r, n_runners=n_r)
+                                           is_jump=is_jump_r, n_runners=n_r,
+                                           is_chase=is_chase_r)
 
-            off_dt  = _parse_off_dt(r)
-            bet_at  = (off_dt - timedelta(minutes=BET_BEFORE_MINUTES) + timedelta(hours=1)).strftime("%H:%M") if off_dt else "?"
-            p1_note = " (below min→skip)" if (a_price and a_price < MIN_PICK1_PRICE) else ""
+            off_dt    = _parse_off_dt(r)
+            bet_at    = (off_dt - timedelta(minutes=BET_BEFORE_MINUTES) + timedelta(hours=1)).strftime("%H:%M") if off_dt else "?"
+            p1_note   = " (below min→skip)" if (a_price and a_price < MIN_PICK1_PRICE) else ""
             place_tag = " 📍" if s_place > 0 else ""
+            p2_note   = f" win=£{s_b:.0f}" if s_b > 0 else f" place=£{s_place:.0f}"
 
             lines.append(
                 f"{badge} <b>{r.get('off','?')} {r.get('course','?')}</b>"
                 f" [bet@{bet_at}]{place_tag}\n"
                 f"  ⭐ {top1.get('horse','?')} ({top1.get('sp','?')}){p1_note} win=£{s_a:.0f} | "
-                f"🔵 {top2.get('horse','?')} ({top2.get('sp','?')}) place=£{s_place:.0f}"
+                f"🔵 {top2.get('horse','?')} ({top2.get('sp','?')}){p2_note}"
             )
 
         if not qualifying:
