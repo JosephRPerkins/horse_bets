@@ -11,14 +11,17 @@ Modes (toggle via Telegram):
            Paper ALWAYS runs in the background even in live mode.
   /live  - real bets placed on Betfair Exchange. Full balance-log settlement.
 
-Staking — Strategy H (validated on 348 races, +£148 vs +£92 baseline):
-  Chase:   P1 win £4 (128.6% ROI, Kelly-justified)
-  Hurdle:  P1 win £2 + P2 win £2 + P1 place £2 + P2 place £2 (8+ runners)
-  NH Flat: P1 win £2 + P1 place £2 (8+ runners)
-  Flat:    P1 win £2 only
+Staking — Strategy H v3.2 (validated on 442 races, +£566 optimised):
+  Chase:      P1 win £6 (100.5% ROI, Kelly 17.8%)
+  Hurdle:     P1 win £2 + P2 win £2 + P1 place £2 + P2 place £2 (8+ rnrs)
+  NH Flat:    P1 win £2 + P1 place £2 (8+ runners)
+  Flat/AW:    P1 win £2 only (bet tier)
+  STD AW:     P1 win £3 (+£0.724/bet, 37% win, 105 races)
+  STD jump:   P1 win £2 (+£0.363/bet, 31% win, 170 races — hurdle/chase only)
 
+  New exclusions: Class 2, Class 5 flat, dead zone (flat SP 3-5/1 n≥9).
   Chase P2 win removed (-£0.930/bet). Flat place bets removed (-£0.127/bet).
-  Hurdle P2 win added (+£0.796/bet, 27% win rate — outperforms P1).
+  Hurdle P2 win added (+£0.254/bet over 69 races full dataset).
 
 BSP fallback:
   When exchange liquidity is below the dynamic threshold for a horse's price,
@@ -58,11 +61,11 @@ from betfair.api         import (
 )
 from betfair.strategy    import (
     qualifies, get_stake, get_place_stake, pick_stakes,
-    win_stake_for_pick, place_stake_for_pick,
+    win_stake_for_pick, place_stake_for_pick, std_win_stake,
     MIN_BACK_PRICE, MIN_LIQUIDITY, MIN_PICK1_PRICE, MIN_PICK2_PRICE,
     should_back_pick1, should_back_pick2, min_liquidity_for_price,
     next_tier_threshold, BET_TIERS, apply_liquidity, p2_win_stake_for_pick,
-    p2_place_stake,
+    p2_place_stake, _is_dead_zone,
 )
 from predict_v2 import TIER_ELITE, TIER_STRONG, TIER_GOOD, TIER_STD, TIER_SKIP, TIER_LABELS
 from betfair.state       import (
@@ -588,6 +591,66 @@ def _live_bet_job(race: dict, state: dict):
     a_score = _sp_free_score(top1) if top1 else 0
     b_score = _sp_free_score(top2) if top2 else 0
 
+    # ── Dead zone filter — applied at bet time with live price ────────────────
+    # Flat races priced 3-5/1 with 9+ runners: -£0.630/bet, -31.5% ROI.
+    if _is_dead_zone(race, a_live):
+        send(
+            f"⏭️ 💰 <b>SKIP - {race_label}</b>\n"
+            f"Dead zone: flat {a_live:.2f} ({a_live:.2f} is 3-5/1), {n_runners} runners — no edge"
+        )
+        return
+
+    # ── STD tier — win-only, no P2 bets, no place bets ───────────────────────
+    if tier not in BET_TIERS:
+        stake_a = std_win_stake(race)
+        if stake_a == 0 or not a_live:
+            send(f"⏭️ 💰 <b>SKIP - {race_label}</b>\nSTD race — no qualifying stake")
+            return
+        lines = [
+            f"💰 <b>LIVE BET - {race_label}</b>",
+            f"{tier_label}",
+            f"Balance: £{balance:.2f} | P1 win: £{stake_a:.0f} (STD)",
+            "------------------------------",
+        ]
+        bets_placed    = []
+        balance_before = balance
+
+        def _try_back_std(sel_id, horse, stake, label, live_price):
+            if stake == 0 or sel_id is None:
+                return None
+            bet = place_bsp(market_id, sel_id, stake)
+            if bet:
+                bet["horse_name"] = horse
+                lines.append(f"🔄 {label}: {horse} — BSP £{stake:.2f}")
+                return bet
+            lines.append(f"❌ {label}: {horse} - BSP order rejected")
+            return None
+
+        bet_a = _try_back_std(a_sel_id, a_name, stake_a, "⭐ Pick 1", a_live)
+        if bet_a:
+            bets_placed.append(bet_a)
+        if not bets_placed:
+            send("\n".join(lines))
+            return
+        send("\n".join(lines))
+        time.sleep(2)
+        balance_after = get_balance()
+        log_bet_placed(race, bets_placed, balance_before, balance_after)
+        # STD races settle via paper path — no live settlement thread needed
+        paper_bets_std = [{
+            "horse": a_name, "price": None, "stake": stake_a,
+            "label": "⭐ Pick 1", "bsp": True,
+        }]
+        t = threading.Thread(
+            target=_paper_settle,
+            args=(race, paper_bets_std, state),
+            kwargs={"place_bets": None, "silent": False},
+            daemon=True, name=f"PaperSettle_{race.get('race_id','')}",
+        )
+        t.start()
+        return
+
+    # ── Bet-tier stake calculation — Strategy H ───────────────────────────────
     # Strategy H stakes
     stake_a     = win_stake_for_pick(a_live, a_score, is_chase=is_chase)
     stake_b     = p2_win_stake_for_pick(b_live, b_score, is_hurdle=is_hurdle)
@@ -812,7 +875,53 @@ def _paper_bet_job(race: dict, state: dict, silent: bool = False):
                 send(f"⏭️ 📝 <b>PAPER SKIP - {race_label}</b>\n🔵 Pick 2 {b_name} - NR, no viable substitute")
             return
 
-    # ── Stake calculation — Strategy H ───────────────────────────────────────
+    # ── Dead zone filter — applied at bet time with live price ────────────────
+    if _is_dead_zone(race, a_live):
+        if not silent:
+            send(
+                f"⏭️ 📝 <b>PAPER SKIP - {race_label}</b>\n"
+                f"Dead zone: flat {a_live:.2f} (3-5/1 range), {n_runners} runners — no edge"
+            )
+        return
+
+    # ── STD tier — win-only paper bet, no P2, no place ───────────────────────
+    if tier not in BET_TIERS:
+        stake_a = std_win_stake(race)
+        if stake_a == 0 or not a_live:
+            return
+        if not silent:
+            sp_display = f"@ {a_live:.2f} " if a_live and a_live >= 1.01 else ""
+            lines = [
+                f"📝 <b>PAPER BET - {race_label}</b>",
+                f"{tier_label}",
+                f"Balance: £{balance:.2f} | P1 win: £{stake_a:.0f} (STD)",
+                "------------------------------",
+                f"📝 ⭐ Pick 1: {a_name} {sp_display}— £{stake_a:.0f}",
+            ]
+            send("\n".join(lines))
+        paper_bets_std = [{
+            "horse": a_name, "price": None, "stake": stake_a,
+            "label": "⭐ Pick 1", "bsp": True,
+        }]
+        if not silent:
+            _save_pending_settlement(state, race.get("race_id", ""), {
+                "race_label":   race_label,
+                "race_off_iso": str(race.get("off_dt", "")),
+                "paper_bets":   paper_bets_std,
+                "place_bets":   None,
+                "race":         race,
+                "ts":           datetime.now().isoformat(),
+            })
+        t = threading.Thread(
+            target=_paper_settle,
+            args=(race, paper_bets_std, state),
+            kwargs={"place_bets": None, "silent": silent},
+            daemon=True, name=f"PaperSettle_{race.get('race_id','')}",
+        )
+        t.start()
+        return
+
+    # ── Bet-tier stake calculation — Strategy H ───────────────────────────────
     from predict_v2 import _sp_free_score
     a_score = _sp_free_score(top1) if top1 else 0
     b_score = _sp_free_score(top2) if top2 else 0
@@ -1163,14 +1272,13 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             "------------------------------",
             f"Total races: {len(races)} | Qualifying: {len(qualifying)} | Bets remaining: {scheduled}",
             f"Tiers: {tier_summary or 'none'}",
-            f"Filters: Not Heavy | Not Irish staying chase | Class 2 excluded | Class 5 flat excluded",
+            f"Filters: Not Heavy | Not Irish staying chase | Class 2 excl | Class 5 flat excl | Dead zone (flat 3-5/1 9+ rnrs) | STD AW + STD jump added",
             "------------------------------",
         ]
 
         for r in sorted(qualifying, key=lambda x: x.get("off", "99:99")):
             top1        = r.get("top1") or {}
             top2        = r.get("top2") or {}
-            tier        = r.get("tier", 0)
             badge       = (r.get("tier_label") or "·").split()[0]
             a_price     = top1.get("sp_dec")
             b_price     = top2.get("sp_dec")
@@ -1183,12 +1291,19 @@ def startup(scheduler: BackgroundScheduler, state: dict, send_briefing: bool = T
             from predict_v2 import _sp_free_score
             a_score = _sp_free_score(top1) if top1 else 0
             b_score = _sp_free_score(top2) if top2 else 0
+            r_tier  = r.get("tier", 0)
 
-            s_a     = win_stake_for_pick(a_price, a_score, is_chase=is_chase_r) if a_price else 0
-            s_b     = p2_win_stake_for_pick(b_price or 0.0, b_score, is_hurdle=is_hurdle_r) if b_price else 0
-            s_place = place_stake_for_pick(b_score, r_tier, sp=b_price or 0.0,
-                                           is_jump=is_jump_r, n_runners=n_r,
-                                           is_chase=is_chase_r)
+            if r_tier not in BET_TIERS:
+                # STD tier race — show std_win_stake, no P2/place
+                s_a     = std_win_stake(r)
+                s_b     = 0.0
+                s_place = 0.0
+            else:
+                s_a     = win_stake_for_pick(a_price, a_score, is_chase=is_chase_r) if a_price else 0
+                s_b     = p2_win_stake_for_pick(b_price or 0.0, b_score, is_hurdle=is_hurdle_r) if b_price else 0
+                s_place = place_stake_for_pick(b_score, r_tier, sp=b_price or 0.0,
+                                               is_jump=is_jump_r, n_runners=n_r,
+                                               is_chase=is_chase_r)
 
             off_dt    = _parse_off_dt(r)
             bet_at    = (off_dt - timedelta(minutes=BET_BEFORE_MINUTES) + timedelta(hours=1)).strftime("%H:%M") if off_dt else "?"
