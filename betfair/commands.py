@@ -40,7 +40,8 @@ import config
 
 from .strategy import (
     get_stake, pick_stakes, MIN_PICK1_PRICE, MIN_PICK2_PRICE,
-    next_tier_threshold, BET_TIERS,
+    next_tier_threshold, BET_TIERS, std_win_stake,
+    win_stake_for_pick, p2_win_stake_for_pick, place_stake_for_pick,
 )
 from .state    import (
     save, get_tier_profit, update_tier_profit,
@@ -56,16 +57,17 @@ CARD_PATH = os.path.join(
 )
 
 # Tier pause state keys — stored in state dict so they persist across restarts
+# STD tier has no pause key — it follows global /stop only
 TIER_PAUSE_KEYS = {
     4: "tier_paused_elite",
     3: "tier_paused_strong",
     2: "tier_paused_good",
 }
-TIER_NAMES = {4: "ELITE", 3: "STRONG", 2: "GOOD"}
+TIER_NAMES  = {4: "ELITE", 3: "STRONG", 2: "GOOD"}
 TIER_BADGES = {4: "💎", 3: "🔥", 2: "✓"}
 
 HELP_TEXT = """\
-🤖 <b>Betfair Bot — System C</b>
+🤖 <b>Betfair Bot — v3.2</b>
 ══════════════════════════════
 <b>Mode</b>
 /paper   — paper trading (simulated, safe — default)
@@ -105,15 +107,33 @@ HELP_TEXT = """\
 
 /help         — this list
 ══════════════════════════════
-<b>System C tiers</b>
-  💎 ELITE:  WIN+PLACE P1+P2 — ~67% P1 win
-  🔥 STRONG: WIN+PLACE P1+P2 — ~49% P1 win
-  ✓ GOOD:   WIN only P1+P2  — ~36% P1 win
-<b>Stakes</b>
-  ELITE:  £2 → £4 @ £30 profit → £6 @ £60
-  STRONG: £2 → £4 @ £50 profit → £6 @ £100
-  GOOD:   £2 → £4 @ £75 profit → £6 @ £150\
+<b>v3.2 qualifying tiers</b>
+  💎 ELITE:  bet-tier, ~37% P1 win rate (clean backtest)
+  🔥 STRONG: bet-tier, ~25% P1 win rate
+  ✓ GOOD:   bet-tier, ~32% P1 win rate
+  · STD AW:  STD tier, AW venues, +£0.724/bet (105 races)
+  · STD jump: STD tier, hurdle/chase cls3-5/IRE, +£0.363/bet
+<b>Stakes (Strategy H v3.2)</b>
+  Chase:    £6 win + £2 place (8+ runners)
+  Hurdle:   £2 win P1 + £2 win P2 + £2 place P1+P2 (8+ runners)
+  NH Flat:  £2 win + £2 place (8+ runners)
+  Flat/AW:  £2 win only (bet tier)
+  STD AW:   £3 win only
+  STD jump: £2 win only\
 """
+
+
+def _is_jump_race(race: dict) -> bool:
+    rtype = (race.get("type") or "").lower()
+    return any(t in rtype for t in ("chase", "hurdle", "nh flat", "national hunt"))
+
+
+def _is_hurdle_race(race: dict) -> bool:
+    return "hurdle" in (race.get("type") or "").lower()
+
+
+def _is_chase_race(race: dict) -> bool:
+    return "chase" in (race.get("type") or "").lower()
 
 
 def _is_tier_paused(state: dict, tier: int) -> bool:
@@ -137,6 +157,7 @@ def is_betting_allowed(state: dict, tier: int, live: bool = False) -> bool:
     and circuit breaker do NOT affect paper — it always runs as a shadow.
 
     live=True: blocked by global pause, tier-specific pause, or circuit breaker.
+    STD tier has no per-tier pause key so it only respects global /stop.
     """
     if state.get("betting_paused", False):
         return False
@@ -169,27 +190,43 @@ def _races_status(state: dict = None) -> str:
     ]
 
     for r in sorted(qualifying, key=lambda x: x.get("off", "99:99")):
-        tier    = r.get("tier", 0)
-        badge   = TIER_BADGES.get(tier, "·")
-        top1    = r.get("top1") or {}
-        top2    = r.get("top2") or {}
-        a_price = top1.get("sp_dec")
-        b_price = top2.get("sp_dec")
-        n_r     = len(r.get("all_runners") or [])
-        profit  = get_tier_profit(state or {}, tier)
-
-        s_a, s_b, s_p = pick_stakes(profit, tier, a_price, b_price, n_runners=n_r)
-
-        p1_note    = " ⚠️odds-on" if (a_price and a_price < MIN_PICK1_PRICE) else ""
-        p2_note    = " ⚠️under 2/1" if (b_price and b_price is not None and b_price < MIN_PICK2_PRICE) else ""
-        place_note = f" 📍£{s_p:.0f}" if s_p > 0 else ""
+        tier        = r.get("tier", 0)
+        badge       = TIER_BADGES.get(tier, "·")
+        top1        = r.get("top1") or {}
+        top2        = r.get("top2") or {}
+        a_price     = top1.get("sp_dec")
+        b_price     = top2.get("sp_dec")
+        n_r         = len(r.get("all_runners") or [])
+        profit      = get_tier_profit(state or {}, tier)
+        is_jump_r   = _is_jump_race(r)
+        is_hurdle_r = _is_hurdle_race(r)
+        is_chase_r  = _is_chase_race(r)
         paused_note = " ⏸️" if _is_tier_paused(state or {}, tier) else ""
 
+        if tier not in BET_TIERS:
+            # STD tier — win-only, no P2 or place
+            s_a   = std_win_stake(r)
+            s_b   = 0.0
+            s_p   = 0.0
+            label = " (STD)"
+        else:
+            s_a   = win_stake_for_pick(a_price, 0.0, is_chase=is_chase_r) if a_price else 0.0
+            s_b   = p2_win_stake_for_pick(b_price or 0.0, 0.0, is_hurdle=is_hurdle_r) if b_price else 0.0
+            s_p   = place_stake_for_pick(0.0, tier, sp=b_price or 0.0,
+                                          is_jump=is_jump_r, n_runners=n_r,
+                                          is_chase=is_chase_r)
+            label = ""
+
+        p1_note    = " ⚠️odds-on" if (a_price and a_price < MIN_PICK1_PRICE) else ""
+        p2_note    = " ⚠️under 2/1" if (b_price and b_price < MIN_PICK2_PRICE) else ""
+        place_note = f" 📍£{s_p:.0f}" if s_p > 0 else ""
+        p2_display = f" | 🔵 {top2.get('horse','?')} ({top2.get('sp','?')}){p2_note} £{s_b:.0f}" if s_b > 0 else ""
+
         lines.append(
-            f"{badge} <b>{r.get('off','?')} {r.get('course','?')}</b>{paused_note}\n"
-            f"  ⭐ {top1.get('horse','?')} ({top1.get('sp','?')}){p1_note} £{s_a:.0f} | "
-            f"🔵 {top2.get('horse','?')} ({top2.get('sp','?')}){p2_note} £{s_b:.0f}"
-            f"{place_note}"
+            f"{badge} <b>{r.get('off','?')} {r.get('course','?')}</b>"
+            f"{paused_note}{label}\n"
+            f"  ⭐ {top1.get('horse','?')} ({top1.get('sp','?')}){p1_note} £{s_a:.0f}"
+            f"{p2_display}{place_note}"
         )
 
     return "\n".join(lines)
@@ -255,7 +292,10 @@ def handle_command(cmd: str, state: dict) -> None:
         tier_lines = []
         for tc in (4, 3, 2):
             if _is_tier_paused(state, tc):
-                tier_lines.append(f"  {TIER_BADGES[tc]} {TIER_NAMES[tc]}: still paused (use /start{TIER_NAMES[tc].lower()})")
+                tier_lines.append(
+                    f"  {TIER_BADGES[tc]} {TIER_NAMES[tc]}: still paused "
+                    f"(use /start{TIER_NAMES[tc].lower()})"
+                )
         pause_note = "\n" + "\n".join(tier_lines) if tier_lines else ""
         send(
             f"▶️ <b>All betting resumed</b>\n"
@@ -345,7 +385,7 @@ def handle_command(cmd: str, state: dict) -> None:
             f"Good luck today."
         )
         logger.info("Betting resumed via /continue after EOD loss pause")
-  
+
     elif cmd == "/breaker":
         if not state.get("circuit_paused", False):
             send("ℹ️ Circuit breaker is not currently active.")
@@ -452,7 +492,7 @@ def handle_command(cmd: str, state: dict) -> None:
 
         mode_icon = "💰" if mode == "LIVE" else "📝"
         lines = [
-            "📊 <b>Betfair Bot Status — System C</b>",
+            "📊 <b>Betfair Bot Status — v3.2</b>",
             "──────────────────────────────",
             f"Mode:          {mode_icon} {mode}",
             f"Betting:       {'🛑 CIRCUIT BREAKER' if circuit else '⏸️ PAUSED' if paused else '▶️ ACTIVE'}",
@@ -460,7 +500,6 @@ def handle_command(cmd: str, state: dict) -> None:
             f"Balance:       £{bal:.2f}",
         ]
 
-        # Tier-specific pause status
         tier_statuses = []
         for tc in (4, 3, 2):
             if _is_tier_paused(state, tc):
@@ -469,8 +508,6 @@ def handle_command(cmd: str, state: dict) -> None:
             lines.append("Tier pauses:   " + " | ".join(tier_statuses))
 
         lines.append("──────────────────────────────")
-
-        # Per-tier pot summary
         lines.append(tier_profit_summary(state))
         lines.append("──────────────────────────────")
 
@@ -487,7 +524,6 @@ def handle_command(cmd: str, state: dict) -> None:
                 f"({paper_wins}W / {len(paper_bets)-paper_wins}L)"
             )
 
-        # Last 5 settled races
         recent = (live_bets if mode == "LIVE" else paper_bets)[-5:]
         if recent:
             lines.append("──────────────────────────────")
@@ -507,7 +543,6 @@ def handle_command(cmd: str, state: dict) -> None:
             send("✅ No pending settlements.")
             return
         send(f"🔄 Re-settling {len(pending)} pending races...")
-        import threading
         from betfair_main import _paper_settle
         for race_id, payload in list(pending.items()):
             t = threading.Thread(
@@ -520,7 +555,7 @@ def handle_command(cmd: str, state: dict) -> None:
             t.start()
         send(f"🔄 Settlement threads launched for {len(pending)} races. Check logs for results.")
         logger.info(f"/settle: launched {len(pending)} settlement threads")
-  
+
     elif cmd == "/help":
         send(HELP_TEXT)
 
